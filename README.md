@@ -15,4 +15,4 @@
 - `admin_qq`：管理员 QQ 列表，默认 `[]`。
 
 ## 注意
-- 关系数据保存在 `data/plugin_data/astrbot_plugin_user_tag/relations.json`。
+- 关系数据保存在 `data/plugin_data/astrbot_plugin_user_tag/user_tag.json`。
