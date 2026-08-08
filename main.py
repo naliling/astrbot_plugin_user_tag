@@ -14,9 +14,9 @@ class Plugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-        # 使用标准数据目录，插件名固定为 astrbot_plugin_relation
+        # 使用标准数据目录，插件名固定为 astrbot_plugin_user_tag
         data_dir = Path(get_astrbot_data_path()) / "plugin_data" / "astrbot_plugin_user_tag"
-        self.data_file = str(Path(data_dir) / "relations.json")
+        self.data_file = str(Path(data_dir) / "user_tag.json")
         self.data = {}
         self._lock = asyncio.Lock()
         self.load_data()
