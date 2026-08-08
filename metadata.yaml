@@ -7,7 +7,7 @@ desc: |
   管理员也可查看所有被设置的关系。
 version: 1.0.5
 author: 娜莉灵
-repo: https://github.com/naliling/astrbot_plugin_relation
+repo: https://github.com/naliling/astrbot_plugin_user_tag
 astrbot_version: ">=4.0.0"
 support_platforms:
   - aiocqhttp
