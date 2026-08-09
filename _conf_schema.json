@@ -1,8 +1,13 @@
 {
-  "admin_qq": {
-    "description": "管理员QQ列表",
-    "type": "list",
-    "hint": "只有配置为管理员的用户可以使用“查看所有关系”等管理指令。",
-    "default": []
-  }
+    "admin_qq": {
+        "description": "管理员QQ列表",
+        "type": "list",
+        "hint": "管理员用户可以使用“查看所有关系”管理指令。",
+        "default": []
+    },
+    "default_relation": {
+        "description": "用户未设置关系时的默认称呼（如：好友、伙伴、陌生人）",
+        "type": "string",
+        "default": "陌生人"
+    }
 }
