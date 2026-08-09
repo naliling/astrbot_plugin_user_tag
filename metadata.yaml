@@ -1,11 +1,12 @@
 name: astrbot_plugin_user_tag
 display_name: 关系识别插件
-short_desc: 用户自定义关系，自动注入到 LLM 上下文
+short_desc: 让 AI 记住你与它的每一种关系
 desc: |
-  可通过指令自定义自己的关系（如恋人/闺蜜），
-  将关系提示注入到上下文中。
-  管理员也可查看所有被设置的关系。
-version: 1.0.5
+  通过指令自定义你与AI的关系（如恋人、闺蜜），
+  预设16种关系模板，也支持完全自由命名。
+  关系标签会自动注入LLM上下文，让AI按设定角色回应你。
+  管理员可查看所有用户的关系图谱与统计。
+version: 1.1.0
 author: 娜莉灵
 repo: https://github.com/naliling/astrbot_plugin_user_tag
 astrbot_version: ">=4.0.0"
@@ -15,4 +16,5 @@ support_platforms:
 tags:
   - 关系管理
   - 上下文注入
-  - 用户自定义
+  - 角色扮演
+  - 情感交互
