@@ -2,11 +2,8 @@ name: astrbot_plugin_user_tag
 display_name: 关系识别插件
 short_desc: 让 AI 记住你与它的每一种关系
 desc: |
-  通过指令自定义你与AI的关系（如恋人、闺蜜），
-  预设16种关系模板，也支持完全自由命名。
-  关系标签会自动注入LLM上下文，让AI按设定角色回应你。
-  管理员可查看所有用户的关系图谱与统计。
-version: 1.1.0
+  轻量且自定义对用户的关系识别，预设16种关系模板，关系标签会自动加到llm上下文，新增是否启用默认关系的开关，另外管理员可查看所有用户的关系列表统计
+version: 1.1.1
 author: 娜莉灵
 repo: https://github.com/naliling/astrbot_plugin_user_tag
 astrbot_version: ">=4.0.0"
