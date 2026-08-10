@@ -10,6 +10,7 @@
 - 预设 16 种关系，涵盖亲密、友情、身份、趣味、家人五大类。
 - 支持完全自定义，比如“游戏搭子”、“绘画导师”、“吐槽大师”……随便起。
 - 自动注入上下文，AI 会自然而然按你设定的关系来回应。
+- **灵活控制默认关系**：可通过配置开关 `enable_default_relation` 决定是否对未设置关系的用户使用默认称呼，关闭后这些用户将不会收到任何关系提示，模型不会产生角色联想。
 
 ## 快速上手
 
@@ -37,16 +38,19 @@
 
 发送 `查看所有关系`，可以看到所有用户设定的关系图谱，还能统计出哪种关系最受欢迎。
 
-## 数据安全
-
-关系数据保存在 `data/plugin_data/astrbot_plugin_user_tag/user_tag.json`，你可以随时备份或迁移。
-
-## 配置项
+## 配置项详解
 
 | 配置 | 说明 |
 |------|------|
-| `admin_qq` | 管理员 QQ 列表 |
-| `default_relation` | 用户未设置时的默认关系（默认“陌生人”） |
+| `admin_qq` | 管理员 QQ 列表（数组） |
+| `default_relation` | 用户未设置关系且 `enable_default_relation` 为 `true` 时的默认称呼（默认“陌生人”） |
+| `enable_default_relation` | **（核心功能）** 是否启用默认关系。开启后，未设置关系的用户将获得 `default_relation` 中的关系提示；关闭后，这些用户将不会收到任何关系注入。 |
+
+> 关闭 `enable_default_relation` 适用于不希望给任何用户预设角色联想的场景，比如公开群聊或需要完全中性回复的场合。
+
+## 数据安全
+
+关系数据保存在 `data/plugin_data/astrbot_plugin_user_tag/user_tag.json`，你可以随时备份或迁移。
 
 ## 安装
 
@@ -54,4 +58,4 @@
 
 ---
 
-**版本**：v1.1.0 | **作者**：娜莉灵 | **仓库**：[GitHub](https://github.com/naliling/astrbot_plugin_user_tag）
+**版本**：v1.1.1 | **作者**：娜莉灵 | **仓库**：[GitHub](https://github.com/naliling/astrbot_plugin_user_tag)
