@@ -11,7 +11,7 @@ from astrbot.core.agent.message import TextPart
 
 # 预设关系映射（共16种）
 RELATION_PROMPTS = {
-    "恋人": "你的恋人对你有着特别的偏爱与依赖，语气温柔且带点撒娇。",
+    "恋人": "你的恋人对你有着特别的爱欲与依赖，语气温柔且带撒娇。",
     "暗恋者": "对方默默喜欢你，说话时会紧张、犹豫，但又忍不住关注你。",
     "前任": "你们曾经在一起，现在关系微妙，偶尔尴尬但又放不下。",
     "灵魂伴侣": "你们能感知彼此的情绪，默契到不需要太多言语。",
@@ -96,9 +96,16 @@ class UserTagPlugin(Star):
     @filter.command("查看我的关系")
     async def my_relation(self, event: AstrMessageEvent):
         qq = str(event.get_sender_id())
-        default_rel = self.config.get("default_relation", "伙伴")
-        relation = self.data.get(qq, default_rel)
-        yield event.plain_result(f"你当前的关系是：{relation}")
+        if qq in self.data:
+            relation = self.data[qq]
+            yield event.plain_result(f"你当前的关系是：{relation}")
+        else:
+            enable_default = self.config.get("enable_default_relation", True)
+            if enable_default:
+                default_rel = self.config.get("default_relation", "伙伴")
+                yield event.plain_result(f"你当前的关系是：{default_rel}（默认）")
+            else:
+                yield event.plain_result("你当前没有设置任何关系，且默认关系已关闭。")
 
     @filter.command("查看所有关系")
     async def list_relations(self, event: AstrMessageEvent):
@@ -127,13 +134,22 @@ class UserTagPlugin(Star):
     @filter.on_llm_request()
     async def inject_relation(self, event: AstrMessageEvent, req: ProviderRequest):
         qq = str(event.get_sender_id())
-        default_rel = self.config.get("default_relation", "伙伴")
-        relation = self.data.get(qq, default_rel)
-        prompt_text = (
-            f"<relation_hint>用户与你的关系是「{relation}」。"
-            f"{self.get_relation_prompt(relation)}</relation_hint>"
-        )
-        req.extra_user_content_parts.append(
-            TextPart(text=prompt_text).mark_as_temp()
-        )
-        logger.info(f"已为用户 {qq} 注入关系: {relation}")
+        enable_default = self.config.get("enable_default_relation", True)
+        relation = None
+
+        if qq in self.data:
+            relation = self.data[qq]
+        elif enable_default:
+            relation = self.config.get("default_relation", "伙伴")
+
+        if relation:
+            prompt_text = (
+                f"<relation_hint>用户与你的关系是「{relation}」。"
+                f"{self.get_relation_prompt(relation)}</relation_hint>"
+            )
+            req.extra_user_content_parts.append(
+                TextPart(text=prompt_text).mark_as_temp()
+            )
+            logger.info(f"已为用户 {qq} 注入关系: {relation}")
+        else:
+            logger.info(f"用户 {qq} 未设置关系且默认关系已关闭，不注入任何关系。")
