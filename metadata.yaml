@@ -6,7 +6,7 @@ desc: |
   让AI秒变你的理想型，每次对话都像在推视觉小说！
   自动注入上下文，无需重复设定；管理员还能代设关系、查看全群关系统计，偷偷吃瓜谁在玩什么剧本～
   轻量、稳定、安全，数据自动备份，随时开演你的专属剧情！(๑•̀ㅂ•́)و✧
-version: 1.3.0
+version: 1.3.1
 author: 娜莉灵
 repo: https://github.com/naliling/astrbot_plugin_user_tag
 astrbot_version: ">=4.0.0"
