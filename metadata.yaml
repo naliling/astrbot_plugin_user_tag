@@ -1,0 +1,21 @@
+name: astrbot_plugin_user_tag
+display_name: 关系识别
+short_desc: 设置你和AI的关系，让AI根据关系调整交流方式！
+desc: |
+  支持用户设置关系、清除关系、查看关系。
+  自动注入关系上下文，让AI根据不同关系调整回复风格。
+  管理员可以查看全部关系和统计。
+version: 1.3.5
+author: 娜莉灵
+repo: https://github.com/naliling/astrbot_plugin_user_tag
+astrbot_version: ">=4.0.0"
+main: main.py
+support_platforms:
+  - aiocqhttp
+  - qq_official
+
+tags:
+  - 关系管理
+  - 上下文注入
+  - 角色扮演
+  - AI交互

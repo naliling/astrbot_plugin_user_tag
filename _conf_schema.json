@@ -1,0 +1,20 @@
+{
+  "admin_qq": {
+    "description": "管理员QQ列表",
+    "type": "list",
+    "hint": "管理员可以使用查看所有关系、关系统计。",
+    "default": []
+  },
+
+  "default_relation": {
+    "description": "默认关系名称",
+    "type": "string",
+    "default": "朋友"
+  },
+
+  "enable_default_relation": {
+    "description": "是否启用默认关系",
+    "type": "bool",
+    "default": false
+  }
+}
