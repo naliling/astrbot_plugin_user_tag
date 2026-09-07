@@ -2,7 +2,7 @@ import json
 import re
 import asyncio
 import traceback
-
+from collections import Counter
 from pathlib import Path
 
 from astrbot.api import logger, AstrBotConfig
@@ -105,7 +105,7 @@ class UserTagPlugin(Star):
         logger.info("[关系插件] 初始化完成")
 
     # ==============================
-    # 读取数据
+    # 读取数据（自动迁移旧格式）
     # ==============================
     def load_data(self):
         try:
@@ -113,10 +113,22 @@ class UserTagPlugin(Star):
 
             if self.data_file.exists():
                 with open(self.data_file, "r", encoding="utf-8") as f:
-                    self.data = json.load(f)
+                    raw = json.load(f)
 
-                logger.info("[关系插件]读取数据:%s", len(self.data))
+                # 检测旧格式：如果所有值都是字符串，说明是旧版 {"qq": "关系"}
+                if all(isinstance(v, str) for v in raw.values()):
+                    logger.warning("[关系插件] 检测到旧格式数据，迁移至 'default' 机器人下。")
+                    self.data = {"default": raw}
+                    # 立即保存新格式
+                    with open(self.data_file, "w", encoding="utf-8") as f:
+                        json.dump(self.data, f, ensure_ascii=False, indent=2)
+                    logger.info("[关系插件] 数据迁移完成，已保存为新格式。")
+                else:
+                    self.data = raw
 
+                logger.info("[关系插件] 读取数据成功，共 %d 个机器人", len(self.data))
+            else:
+                self.data = {}
         except Exception:
             logger.error(traceback.format_exc())
             self.data = {}
@@ -132,6 +144,16 @@ class UserTagPlugin(Star):
         except Exception:
             logger.error(traceback.format_exc())
 
+    # ==============================
+    # 获取当前机器人ID
+    # ==============================
+    def get_bot_id(self, event: AstrMessageEvent):
+        try:
+            bot_id = event.get_self_id()
+            return str(bot_id) if bot_id else "default"
+        except Exception:
+            return "default"
+
     def get_relation_prompt(self, relation):
         return RELATION_PROMPTS.get(
             relation,
@@ -139,9 +161,10 @@ class UserTagPlugin(Star):
         )
 
     # ==============================
-    # 设置关系核心
+    # 设置关系核心（隔离）
     # ==============================
     async def save_relation(self, event, relation):
+        bot_id = self.get_bot_id(event)
         qq = str(event.get_sender_id())
         relation = relation.strip()
 
@@ -149,15 +172,18 @@ class UserTagPlugin(Star):
             yield event.plain_result("关系不能为空")
             return
 
-        self.data[qq] = relation
+        # 确保该机器人下有字典
+        if bot_id not in self.data:
+            self.data[bot_id] = {}
+
+        self.data[bot_id][qq] = relation
         await self.save_data()
 
-        logger.info("[关系插件] 用户%s设置关系:%s", qq, relation)
+        logger.info("[关系插件] 机器人 %s 用户 %s 设置关系: %s", bot_id, qq, relation)
         yield event.plain_result(f"已设置为：{relation}")
 
     # ==============================
-    # 命令模式
-    # /设置关系 恋人
+    # 命令模式：/设置关系 恋人
     # ==============================
     @filter.command("设置关系")
     async def set_relation(self, event: AstrMessageEvent):
@@ -172,55 +198,55 @@ class UserTagPlugin(Star):
             yield result
 
     # ==============================
-    # 普通文本模式
-    # 设置关系 恋人
+    # 普通文本模式：设置关系 恋人
     # ==============================
     @filter.regex(r"^/?设置关系\s+(.+)$")
     async def set_relation_text(self, event: AstrMessageEvent):
         logger.info("[关系插件] 正则设置关系触发")
-        
-        # 修复：手动使用 re 模块进行正则匹配，适配所有平台的 event
         match = re.search(r"^/?设置关系\s+(.+)$", event.message_str)
         if not match:
             return
-            
         relation = match.group(1).strip()
 
         async for result in self.save_relation(event, relation):
             yield result
 
-
     # ==============================
-    # 清除关系
+    # 清除关系（隔离）
     # ==============================
     @filter.command("清除关系")
     async def clear_relation(self, event: AstrMessageEvent):
+        bot_id = self.get_bot_id(event)
         qq = str(event.get_sender_id())
 
-        if qq in self.data:
-            del self.data[qq]
+        if bot_id in self.data and qq in self.data[bot_id]:
+            del self.data[bot_id][qq]
             await self.save_data()
-            logger.info("[关系插件] 用户%s清除关系", qq)
+            logger.info("[关系插件] 机器人 %s 用户 %s 清除关系", bot_id, qq)
             yield event.plain_result("关系已清除")
         else:
             yield event.plain_result("没有关系记录")
 
     # ==============================
-    # 查看我的关系
+    # 查看我的关系（隔离）
     # ==============================
     @filter.command("查看我的关系")
     async def my_relation(self, event: AstrMessageEvent):
+        bot_id = self.get_bot_id(event)
         qq = str(event.get_sender_id())
 
-        if qq in self.data:
-            yield event.plain_result(f"你的关系：{self.data[qq]}")
+        if bot_id in self.data and qq in self.data[bot_id]:
+            yield event.plain_result(f"你的关系：{self.data[bot_id][qq]}")
             return
 
         default = self.config.get("default_relation", "好友")
-        yield event.plain_result(f"你的关系：{default}（默认）")
+        if self.config.get("enable_default_relation", True):
+            yield event.plain_result(f"你的关系：{default}（默认）")
+        else:
+            yield event.plain_result("未设置关系")
 
     # ==============================
-    # 关系列表
+    # 关系列表（不变）
     # ==============================
     @filter.command("关系列表")
     async def relation_list(self, event: AstrMessageEvent):
@@ -231,8 +257,7 @@ class UserTagPlugin(Star):
         yield event.plain_result("\n".join(result))
 
     # ==============================
-    # 查看所有关系
-    # 管理员
+    # 查看所有关系（管理员，按机器人分组）
     # ==============================
     @filter.command("查看所有关系")
     async def all_relation(self, event: AstrMessageEvent):
@@ -248,14 +273,15 @@ class UserTagPlugin(Star):
             yield event.plain_result("暂无关系数据")
             return
 
-        result = ["======全部关系======"]
-        for uid, relation in self.data.items():
-            result.append(f"{uid} : {relation}")
+        result = ["====== 全部关系（按机器人分组） ======"]
+        for bot_id, user_dict in self.data.items():
+            result.append(f"\n--- 机器人 {bot_id} ---")
+            for uid, relation in user_dict.items():
+                result.append(f"{uid} : {relation}")
         yield event.plain_result("\n".join(result))
 
     # ==============================
-    # 关系统计
-    # 管理员
+    # 关系统计（管理员，按机器人分组）
     # ==============================
     @filter.command("关系统计")
     async def relation_stat(self, event: AstrMessageEvent):
@@ -271,27 +297,30 @@ class UserTagPlugin(Star):
             yield event.plain_result("暂无数据")
             return
 
-        from collections import Counter
-        counter = Counter(self.data.values())
-
-        result = ["======关系统计======"]
-        for relation, count in counter.items():
-            result.append(f"{relation}: {count}")
+        result = ["====== 关系统计（按机器人分组） ======"]
+        for bot_id, user_dict in self.data.items():
+            if not user_dict:
+                continue
+            counter = Counter(user_dict.values())
+            result.append(f"\n--- 机器人 {bot_id} ---")
+            for relation, count in counter.items():
+                result.append(f"{relation}: {count}")
         yield event.plain_result("\n".join(result))
 
     # ==============================
-    # LLM关系上下文注入
+    # LLM关系上下文注入（隔离）
     # ==============================
     @filter.on_llm_request()
     async def inject_relation(self, event: AstrMessageEvent, req: ProviderRequest):
         try:
+            bot_id = self.get_bot_id(event)
             qq = str(event.get_sender_id())
             relation = None
 
-            # 用户设置优先
-            if qq in self.data:
-                relation = self.data[qq]
-            # 没设置使用默认
+            # 优先从当前机器人数据中获取
+            if bot_id in self.data and qq in self.data[bot_id]:
+                relation = self.data[bot_id][qq]
+            # 若未设置且启用默认，则使用全局默认
             elif self.config.get("enable_default_relation", True):
                 relation = self.config.get("default_relation", "好友")
 
@@ -303,7 +332,7 @@ class UserTagPlugin(Star):
                     + "</relation_hint>"
                 )
                 req.extra_user_content_parts.append(TextPart(text=prompt))
-                logger.info("[关系插件] LLM注入成功 关系:%s", relation)
+                logger.info("[关系插件] LLM注入成功 机器人:%s 关系:%s", bot_id, relation)
             else:
                 logger.info("[关系插件] 无关系，不注入")
         except Exception:
