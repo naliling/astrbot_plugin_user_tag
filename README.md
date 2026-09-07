@@ -70,4 +70,4 @@
 
 ---
 
-**版本**：v1.3.5 | **作者**：娜莉灵 | **仓库**：[GitHub](https://github.com/naliling/astrbot_plugin_user_tag)
+**版本**：v1.3.6 | **作者**：娜莉灵 | **仓库**：[GitHub](https://github.com/naliling/astrbot_plugin_user_tag)
