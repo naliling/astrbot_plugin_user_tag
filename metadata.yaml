@@ -6,12 +6,12 @@ desc: |
 
   它维护一个会随时间自行流动的生理层（soma）：睡眠压力与睡眠债、昼夜节律相位、精力、
   唤醒度、饥饿、躯体不适（久坐、冷热、生理周期）、社交能量与「想找人说说话」的程度。
-  与「自主拟人社交」(astrbot_plugin_autonomous_social v1.7.5+) 联动：本插件把身体状态
+  与「自主拟人社交」(astrbot_plugin_autonomous_social v1.7.x+) 联动：本插件把身体状态
   导出成带版本号的契约快照（state.json 内的 contract 段），社交层据此判断她现在想不想
   开口、想找谁、说什么更自然，并把「刚主动找过谁」「被冷落几次」写回独立的信号文件，
   影响她的心境与想说的心思。两边各写各的文件，不会互相抢写。单独安装本插件也能正常
   工作——她会累会饿有心境，只是不会主动找人说话；两个都装则无需额外配置，自动识别。
-version: 2.14.1
+version: 2.14.2
 author: 娜莉灵
 repo: https://github.com/naliling/humanoid_core_plugin
 astrbot_version: ">=4.0.0"
