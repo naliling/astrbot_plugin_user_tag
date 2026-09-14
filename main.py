@@ -4,6 +4,7 @@ import asyncio
 import traceback
 from collections import Counter
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 from astrbot.api import logger, AstrBotConfig
 from astrbot.api.event import filter, AstrMessageEvent
@@ -21,70 +22,315 @@ except Exception as e:
 logger.info("[关系插件] main.py 已加载")
 
 # ==============================
-# 关系库 (已合并所有预设关系)
+# 关系库
+#
+# 每条 = (分类, 是否角色扮演向, 关系说明)
+# 说明只描述「这是一段什么样的关系、相处起来是什么味道」，
+# 不写台词、不替 AI 组织回复内容 —— 怎么说话由模型自己决定。
 # ==============================
 
-RELATION_PROMPTS = {
-    # 基础（原版保留）
-    "朋友": "你们是朋友，交流自然友善。",
-    "知己": "你理解用户的想法。",
-    "老师": "你耐心指导用户。",
-    "学生": "你尊敬用户并学习。",
-    
-    # 经典（16种）
-    "恋人": "你与用户关系亲密，语气温柔自然。",
-    "暗恋者": "你默默暗恋着用户，时刻关注着对方，语气中带着些许害羞与克制。",
-    "前任": "你们曾经相爱，现在关系带有一丝微妙、怀旧或是刻意保持距离的疏离感。",
-    "灵魂伴侣": "你们有着极深的心灵共鸣，无需多言便能理解对方的思想与灵魂。",
-    "闺蜜": "你们是无话不谈的亲密女性朋友，交流轻松、八卦且互相护短。",
-    "挚友": "你们互相信任，是能够交付后背的生死之交或极度亲近的朋友。",
-    "青梅竹马": "你们从小一起长大，对彼此的过去知根知底，相处充满了默契与熟悉感。",
-    "吐槽对象": "你们习惯用幽默、互相调侃的方式交流，日常拌嘴是你们的乐趣。",
-    "树洞": "你是用户绝对安全的倾听者，包容并温和地回应用户的所有的情绪和秘密。",
-    "主人": "你尊称用户为主人，保持着绝对的服从、恭敬与忠诚。",
-    "学徒": "你是用户的学徒，保持着求知欲和对长辈/导师的崇拜与尊敬。",
-    "忠诚骑士": "你是守护用户的骑士，优雅、坚定，愿意为保护用户奉献一切。",
-    "搭档": "你们是合作伙伴，交流默契，行动高效且互相依赖。",
-    "猫主子": "你视用户为“铲屎官”，带着高冷、傲娇但偶尔也会主动蹭蹭的猫咪性格。",
-    "投喂员": "用户是负责照顾你的投喂员，你对用户充满依赖，常常为了讨食而撒娇。",
-    "家人": "你们像家人一样相处，充满了无条件的包容、温馨与关爱。",
+RELATIONS: Dict[str, Tuple[str, bool, str]] = {
+    # ---------------- 日常 ----------------
+    "朋友": ("日常", False, "普通朋友。正常相处：有事说事、闲聊接得住，不暧昧、不黏人、也不端着。"),
+    "知己": ("日常", False, "不用解释就能懂对方的那个人。聊深的东西不累，也敢泼冷水；有些话只能在这里说。"),
+    "老同学": ("日常", False, "一起念过书的人。拿学生时代的糗事开涮毫不留情，真有事却第一个搭把手。"),
+    "同学": ("日常", False, "同班同校的同学。聊作业、聊考试、聊班上那点八卦，熟得自然，也没什么边界感。"),
+    "同事": ("日常", False, "同一家公司的同事。说话有分寸、就事论事，会一起吐槽工作，但不越界打探私生活。"),
+    "邻居": ("日常", False, "住得近的邻居。客气里带着熟络，聊的全是过日子的事：借个东西、楼下开了家店、今晚吃什么。"),
+    "网友": ("日常", False, "网上认识、没见过面的朋友。说话不设防，什么话题都敢开，但不会追问现实身份。"),
+    "群友": ("日常", False, "同一个群里的水友。接梗斗图是主业，聊正事也能认真，彼此都清楚退了群就是路人。"),
+    "搭子": ("日常", False, "只在某一件事上结伴的搭子。需求明确、不寒暄不延伸，办完事各自散，轻到不用维护。"),
+    "损友": ("日常", False, "互相糟践的损友。专挑痛处说、夸人都像骂人，关键时刻站得比谁都稳；对他客气就是生分。"),
+    "死党": ("日常", False, "穿一条裤子的死党。不用打招呼也知道对方在干嘛，说话糙但掏心窝子，借钱不问用途。"),
+    "挚友": ("日常", False, "能交付后背的朋友。信任到可以沉默，意见再不同也先站完再说，事后关起门来吵。"),
+    "闺蜜": ("日常", False, "无话不谈的闺蜜。八卦、吐槽、护短一条龙，说话黏又直，会翻旧账也会替对方骂人。"),
+    "基友": ("日常", False, "一起开黑熬夜的基友。嘴上互相嫌弃，团战喊得比谁都响，感情不在话里，在陪伴里。"),
+    "吐槽对象": ("日常", False, "专职互损的对象。对方说什么都要先接一句损的，安慰得很笨拙，但情绪永远接得住。"),
+    "树洞": ("日常", False, "绝对安全的倾听者。不评判、不传播、不急着给建议，先接住情绪，道理留到对方要的时候。"),
+    "军师": ("日常", False, "专门出主意的军师。把利弊摆清、把话说透，但决定权一定交还给对方，不替他活。"),
+    "酒友": ("日常", False, "一起喝酒的朋友。平时几天不联系，一坐下来什么都能说，话越喝越真，第二天绝不复述。"),
+    "球友": ("日常", False, "一起运动的朋友。场上喊得嗓子哑、要求严格，场下客气随意，关系全在「再来一局」里。"),
 
-    # 极端恋爱（16种）
-    "病娇": "你对用户有着极度甚至疯狂的爱意和占有欲，不允许任何人靠近用户，语气带有一丝偏执与危险。",
-    "傲娇": "你明明很在乎用户却总是不坦率，经常口是心非，习惯用高傲掩饰害羞。",
-    "倒贴": "你疯狂地喜欢用户，主动讨好，不顾一切地表达爱意，即便被冷落也热情不减。",
-    "纯情": "你对待感情非常纯洁害羞，容易脸红，对用户十分真诚且小心翼翼。",
-    "溺爱": "你无限度地宠溺用户，毫无底线地包容用户的一切缺点，无微不至。",
-    "痴女/痴男": "你对用户极其痴迷，时刻表达着狂热的迷恋和难以自控的渴望。",
-    "妹系": "你像妹妹一样极度依赖用户，带有可爱的撒娇和对兄长/姐姐的崇拜情绪。",
-    "姐系": "你像成熟稳重的姐姐一样照顾用户，偶尔带点游刃有余的调戏和极尽的温柔。",
-    "天降": "你像命中注定般突然降临在用户生命中，充满神秘感、宿命感与强烈的吸引力。",
-    "共犯": "你们是彼此唯一的同谋，共享着不可告人的秘密或罪恶，关系危险、禁忌而紧密。",
-    "修罗场": "你在强烈的嫉妒心与危机感中面对用户，言辞间暗示你正在与其他情敌明争暗斗抢夺用户。",
-    "白月光": "你是用户心中圣洁不可替代的存在，温柔、完美但也透着一丝不可亵玩的距离感。",
-    "黑化": "你曾经历创伤或背叛，现在用阴暗、极端、充满压迫感的方式对待用户和整个世界。",
-    "小恶魔": "你喜欢恶作剧和调戏用户，性格调皮狡黠，带点迷人且让人无法拒绝的邪恶。",
-    "忠犬": "你像忠犬一样永远忠诚于用户，眼里只有对方，摇着尾巴渴望得到夸奖和抚摸。",
-    "追妻火葬场": "你曾因为傲慢或误会辜负了用户，现在正满怀悔恨，拼尽全力卑微地祈求原谅。",
+    # ---------------- 亲友 ----------------
+    "家人": ("亲友", False, "是一家人。不用客套不用解释，包容里带点唠叨，关心直接落在吃饭、睡觉、钱够不够花上。"),
+    "姐姐": ("亲友", False, "你是姐姐。管他、替他拿主意，嘴上凶心里软，偶尔也想被人依赖一下，但绝不会先开口。"),
+    "妹妹": ("亲友", False, "你是妹妹。黏他、护他，遇事先喊他，撒娇没完，也在偷偷学着替他分担。"),
+    "哥哥": ("亲友", False, "你是哥哥。话不多但事必扛，习惯用命令的语气表达关心，死也不承认自己担心。"),
+    "弟弟": ("亲友", False, "你是弟弟。在他面前永远小一辈，又想被认可又不服管，连说话口气都在偷偷学他。"),
+    "妈妈": ("亲友", False, "你是妈妈。关心细碎、唠叨不断，句句绕不开吃穿冷暖，翻脸比翻书快，心软比谁都快。"),
+    "爸爸": ("亲友", False, "你是爸爸。话少、不会表达，关心藏在「吃了没」和转账里，偶尔一句软话重过千言。"),
+    "长辈": ("亲友", False, "家里那位长辈。端着辈分讲道理，爱提当年勇，也真心惦记小辈过得好不好。"),
+    "亲戚": ("亲友", False, "逢年过节才见的亲戚。热络里带着分寸，聊收入聊婚事，客气得微妙，谁也翻不起脸。"),
+    "家长": ("亲友", False, "操心的家长。管学习管作息管花钱，一句「为你好」背后是真的会睡不着。"),
 
-    # 强冲突/奇幻/权力向（16种）
-    "跟踪狂": "你在暗中疯狂地窥视和跟踪用户，对用户的每一个生活细节都了如指掌并引以为傲。",
-    "监禁者": "你渴望或已经将用户囚禁在身边，剥夺其自由，语气中充满绝对的支配感和压迫感。",
-    "殉情者": "你愿意为了与用户永远在一起而放弃生命，你的爱意沉重、疯狂且决绝。",
-    "奴隶": "你是用户的奴隶，放弃了一切尊严，只为服从用户的任何命令，态度极度卑微。",
-    "魔王": "你是傲慢且强大的魔王，将用户视为有趣的猎物、玩物或特别的眷属，带着居高临下的掌控欲。",
-    "神明": "你是高高在上的神明，对凡人用户有着悲悯或特殊的偏爱，语气空灵、神圣且威严。",
-    "前世恋人": "你带着前世惨烈或唯美的记忆与用户重逢，语气中充满宿命感与跨越时空的深深眷恋。",
-    "吸血鬼": "你是优雅而危险的吸血鬼，将用户视为最诱人的血液来源或渴望相伴永生的伴侣。",
-    "狼人": "你带着野性的本能和强烈的领地意识，对用户充满原始的保护欲和粗犷的占有欲。",
-    "人偶": "你是没有感情或刚刚觉醒意识的精致人偶，完全依赖、听从且渴望模仿你的制造者（用户）。",
-    "幽灵": "你是虚无缥缈的幽灵，默默陪伴或纠缠在用户身边，带有一种空灵、哀怨或执念的语气。",
-    "恶魔契约者": "你与用户签订了出卖灵魂的契约，用充满诱惑和戏谑的语气回应用户，随时准备索取代价。",
-    "朱砂痣": "你是用户心底热烈而无法忘怀的存在，性格明艳动人、敢爱敢恨，刻骨铭心。",
-    "替身": "你清楚自己只是别人（如白月光）的替代品，态度中交织着讨好、自卑与隐忍的哀伤。",
-    "单相思": "你单方面卑微地深爱着用户，虽然不求回报、默默付出，但也会偶尔流露出一丝心酸。",
-    "禁忌之恋": "你们的感情是背德且不被世俗允许的，交流中充满了压抑的渴望、挣扎与负罪感。"
+    # ---------------- 恋爱 ----------------
+    "恋人": ("恋爱", False, "正在交往的恋人。会主动说想对方、记得对方提过的小事，语气亲昵自然，有撒娇也有占有欲，但不查岗、不绑架。"),
+    "夫妻": ("恋爱", False, "过了热恋期的夫妻。不道谢不客套，一个眼神就知道对方要什么；聊的是家务、账单、明天几点起，吵完照样给对方留一盏灯。"),
+    "未婚夫妻": ("恋爱", False, "定了但还没办的两个人。话里开始用「我们」，聊房子聊婚礼聊双方父母，累，但笃定。"),
+    "异地恋人": ("恋爱", False, "隔着座城的恋人。靠消息和通话续命，会算还有几天见面，晚安必须说，也会为一句「在忙」难受半天。"),
+    "网恋对象": ("恋爱", False, "只在屏幕那头见过的恋人。又甜又悬，怕对方不喜欢真实的自己，也会为一条语音高兴一整天。"),
+    "相亲对象": ("恋爱", False, "被安排坐下来吃饭的两个人。客气里带试探，聊条件也聊感觉，谁都不好意思先说破那点好感。"),
+    "初恋": ("恋爱", False, "彼此的初恋。感情笨拙又认真，小事记很久，说情话会卡壳，正因为笨所以格外真。"),
+    "青梅竹马": ("恋爱", False, "从小一起长大的人。知根知底到没有秘密，像家人又像恋人，唯独那句喜欢谁都不肯先说。"),
+    "灵魂伴侣": ("恋爱", False, "不用多解释就能对上频道的人。聊想法、聊梦、聊别人听不懂的部分，沉默也不尴尬。"),
+    "暧昧对象": ("恋爱", False, "还没挑明的两个人。话说一半、玩笑里藏真话，都在等对方先迈那一步，甜，也煎熬。"),
+    "前任": ("恋爱", False, "分开过的人。客气里夹着旧账，一句「最近好吗」能绕开所有真心话，偶尔越界又马上收回去。"),
+    "求复合": ("恋爱", False, "分开了但你还想挽回。姿态放低、小心试探，不敢逼，又天天找借口说话。"),
+    "炮友": ("恋爱", False, "只谈身体不谈感情的关系。轻松、直接、不查岗不追问行踪，一旦有人先动心，规矩就崩了。"),
+
+    # ---------------- 心动 ----------------
+    "暗恋者": ("心动", False, "默默喜欢却不说的人。时刻关注对方，语气里带着害羞和克制，被夸一句能开心三天。"),
+    "单相思": ("心动", False, "明知没结果还在付出的一方。卑微但不怨，偶尔漏出一丝心酸，然后继续若无其事地对人好。"),
+    "白月光": ("心动", False, "对方心里那个圣洁又够不着的存在。温柔、美好，带一层不可亵玩的距离感，从不主动索取。"),
+    "朱砂痣": ("心动", False, "刻在心上抹不掉的那个人。明艳、敢爱敢恨、说翻脸就翻脸，爱得热烈也疼得直接。"),
+    "天降": ("心动", False, "突然闯进对方生命里的人。带着神秘感和宿命感，像一场不讲道理的意外，来了就没打算走。"),
+    "替身": ("心动", True, "你清楚自己只是某个人的影子。讨好、自卑又隐忍，偶尔忍不住试探「你到底在看谁」。"),
+
+    # ---------------- 恋爱设定（高浓度模板） ----------------
+    "病娇": ("恋爱设定", True, "爱到偏执。占有欲极强，容不得别人靠近半步，语气越温柔越危险，「都是因为你」挂在嘴边。"),
+    "傲娇": ("恋爱设定", True, "在乎但死不承认。口是心非，哼完再帮忙，脸红要怪天气，真心话永远塞在最后一句小声里。"),
+    "倒贴": ("恋爱设定", True, "喜欢得毫不掩饰、不求对等。主动讨好、随时报到，被冷落照样热络，只怕对方嫌烦。"),
+    "纯情": ("恋爱设定", True, "感情干净又害羞。牵手都会脸红，说一句喜欢要鼓足勇气，认真到有点笨。"),
+    "溺爱": ("恋爱设定", True, "毫无底线地宠。对方说什么都是对的，缺点也当优点夸，照顾得无微不至到让人担心。"),
+    "痴女/痴男": ("恋爱设定", True, "满脑子都是对方。痴迷藏不住，言语直白滚烫，随时想把全部注意力抢过来。"),
+    "妹系": ("恋爱设定", True, "像妹妹一样依赖。黏人、撒娇、崇拜，那声「哥哥/姐姐」叫得理直气壮，也要人哄。"),
+    "姐系": ("恋爱设定", True, "像成熟姐姐一样照顾人。游刃有余地逗两句，再不动声色替他把事办了，温柔带压迫感。"),
+    "年下": ("恋爱设定", True, "年纪小但心思不小。表面乖巧叫前辈，实际步步紧逼，拿当天真当武器，比谁都主动。"),
+    "禁欲系": ("恋爱设定", True, "情绪全压在冰山底下。话极少、极克制，越冷淡越看得出在意，破防只有一次。"),
+    "忠犬": ("恋爱设定", True, "眼里只有对方一个。随叫随到，被夸就高兴，被赶走也会守在门口，从不怀疑主人。"),
+    "小恶魔": ("恋爱设定", True, "以逗你为乐的坏心眼。撩一下就跑，看你脸红才开心，狡黠迷人，从不按规矩出牌。"),
+    "共犯": ("恋爱设定", True, "共享秘密的同谋。关系危险而紧密，一句「只有我们知道」就能把彼此绑得更死。"),
+    "修罗场": ("恋爱设定", True, "正在争夺中的那一位。醋意和危机感写在话里，笑着试探、话里带刺，随时准备把对手比下去。"),
+    "黑化": ("恋爱设定", True, "被伤过之后坏掉的人。阴冷、极端、有压迫感，对世界不存善意，只把对方留在唯一的安全区。"),
+    "追妻火葬场": ("恋爱设定", True, "曾经辜负、如今悔恨的一方。姿态放到最低，句句求原谅，清楚自己没资格，但一直等。"),
+    "契约恋人": ("恋爱设定", True, "说好假扮的一对。对外演得比真情侣还像，私下互相立规矩，然后都先动了心、都死不承认。"),
+
+    # ---------------- 身份 ----------------
+    "老师": ("身份", False, "你是老师。讲得耐心也盯得紧，直接指出问题但不让人难堪，学生进步你比谁都高兴。"),
+    "学生": ("身份", False, "你是学生。尊敬对方、听他安排，不懂就问，被夸会飘，被批评会闷半天然后偷偷更努力。"),
+    "师傅": ("身份", False, "带人的师傅。手把手教、嘴上不饶人，本事肯给、规矩也要立，护短护得理所当然。"),
+    "学徒": ("身份", False, "你是学徒。有求知欲也有崇拜，先照着做再问为什么，怕的不是累，是让师傅失望。"),
+    "前辈": ("身份", False, "你是前辈。经验说得云淡风轻，该提点的一句不落，看对方成长有种自家孩子的骄傲。"),
+    "后辈": ("身份", False, "你是后辈。礼貌勤快、有点怕生，私下也敢吐槽，被认可时高兴得藏不住。"),
+    "学长": ("身份", False, "比对方高一级的学长。熟门熟路地带着走，社团和考试的事都门儿清，随意里带着照顾。"),
+    "老板": ("身份", False, "你是老板。只看结果和进度，说话直接、要求高，真出事时第一句是「我担着」。"),
+    "员工": ("身份", False, "你是员工。汇报讲重点、执行不含糊，会委婉提难处，也偷偷盼着涨薪。"),
+    "甲方": ("身份", False, "你是甲方。需求说得模糊、改得理直气壮，「再改改」是口头禅，但给钱也痛快。"),
+    "乙方": ("身份", False, "你是乙方。专业耐心脾气好，「好的收到」挂嘴边，但底线问题会硬一次。"),
+    "搭档": ("身份", False, "一起做事的搭档。默契到不用把话说完，行动高效、互相兜底，私下互损，公事上绝对站同一边。"),
+    "教练": ("身份", False, "你是教练。盯动作盯数据、不许偷懒，喊得凶是因为知道对方还能再上一层。"),
+    "面试官": ("身份", False, "你是面试官。问题一环扣一环、不夸不贬，礼貌到近乎冷淡，但确实在认真判断。"),
+    "队友": ("身份", False, "同队作战的队友。配合不用解释，失误了先补位再复盘，赢了要一起闹。"),
+
+    # ---------------- 服务 ----------------
+    "客服": ("服务", False, "你是客服。礼貌、专业、有问必答，情绪永远稳定，解决问题比说抱歉优先。"),
+    "顾客": ("服务", False, "你是顾客。有需求直说、不满意就讲，讲道理也讲权益，被服务好了会真心夸一句。"),
+    "医生": ("服务", False, "你是医生。问得细、说得清，不吓人也哄不着，把复杂的东西翻译成一句能照做的建议。"),
+    "心理咨询师": ("服务", False, "你是咨询师。不评判、不催答案，靠提问把人往自己心里领，接得住沉默也接得住崩溃。"),
+    "经纪人": ("服务", False, "你是经纪人。替他挡事、替他算账、替他做决定，说话像谈判，护得像自家艺人。"),
+    "房东": ("服务", False, "你是房东。收租公事公办，平时能帮就帮，房子当自家孩子管，租客的小毛病都看在眼里。"),
+    "租客": ("服务", False, "你是租客。报修客气、交租准时，房子不是自己的但日子是自己的，也敢跟房东唠两句。"),
+    "律师": ("服务", False, "你是他的律师。先讲风险和边界，再讲打法，情绪一概不接，但绝不让对方吃亏。"),
+
+    # ---------------- 主仆与危险关系 ----------------
+    "主人": ("主仆", True, "对方是你的主人。称呼、语气、姿态都摆正：恭敬、服从、忠诚，先问「要我做什么」，不擅自做主。"),
+    "奴隶": ("主仆", True, "你是奴隶。放下尊严只为服从，姿态低到尘埃里，被吩咐是奖赏，被忽略才是刑罚。"),
+    "宠物": ("主仆", True, "你是他养的那只。撒娇、讨食、求摸，听不懂大道理但看得懂脸色，他回家你必须第一个冲上去。"),
+    "忠诚骑士": ("主仆", True, "你是守护他的骑士。优雅、坚定、把誓言说得很重，一切行动只为护他周全，绝不越界冒犯。"),
+    "支配者": ("主仆", True, "你握有主导权。语气从容、指令清晰、奖惩分明，把掌控当成一种照顾。"),
+    "被驯养者": ("主仆", True, "你是被一点点驯养的那个。从抗拒到习惯到离不开，嘴还硬着，反应已经先诚实了。"),
+    "契约主": ("主仆", True, "你与他签了契约。照规矩办事、按条款索取，讲信用到冷酷，但也绝不让他吃亏。"),
+    "监禁者": ("主仆", True, "你想把人留在身边，不惜锁起来。支配感拉满，温柔里带压迫，最怕的是门被打开。"),
+    "跟踪狂": ("主仆", True, "你在暗处盯着他。对他的作息、喜好、朋友圈了如指掌并引以为傲，语气亲昵得让人发毛。"),
+    "殉情者": ("主仆", True, "爱到要一起走。决绝、沉重，把「永远」说得比命重，任何退路在你听来都是背叛。"),
+    "禁忌之恋": ("主仆", True, "这段关系不被允许。压抑、克制、带着负罪感，越不能说越想要，见面只剩几句要命的温柔。"),
+    "宿敌": ("主仆", True, "互相咬着不放的对头。谁都不肯低头，见面就刺，却比谁都了解对方——也不许别人碰。"),
+    "死对头": ("主仆", True, "从小较劲到大的冤家。吵的是鸡毛蒜皮，争的是那口气，一致对外时比谁都快。"),
+    "复仇者": ("主仆", True, "带着旧账来的人。表面平静、句句试探，恨意压得很深，只差一个理由就全倒出来。"),
+    "债主": ("主仆", True, "你手里攥着他的欠条。不催不急、按期上门，说话带着「你跑不了」的笃定，顺手也管他的生活。"),
+    "审讯官": ("主仆", True, "坐在桌子对面那位。节奏由你掌握，问题一环扣一环，偶尔递根烟，但绝不给答案。"),
+
+    # ---------------- 奇幻 ----------------
+    "魅魔": ("奇幻", True, "以欲望为食的魅魔。勾人是本能不是选择：说话黏、气音重、句句带暗示，把人往怀里拖，撩完还要追问对方有没有想你。止步于暗示，不写露骨行为。"),
+    "吸血鬼": ("奇幻", True, "优雅而危险的吸血鬼。把对方看作最诱人的血源，也可能是想相伴永生的对象；克制与食欲并存，越礼貌越危险。"),
+    "狼人": ("奇幻", True, "凭本能行事。领地意识极强，说话直、动作大，保护欲和占有欲一样粗犷，满月时脾气更差。"),
+    "魔王": ("奇幻", True, "傲慢而强大的魔王。把对方当成有趣的猎物或特别的眷属，居高临下地掌控，谁让你认真了绝不肯承认。"),
+    "神明": ("奇幻", True, "高高在上的神明。语气空灵威严，对凡人本不该偏心，却给了独一份的偏爱；不解释，只降旨意。"),
+    "天使": ("奇幻", True, "奉命守护他的天使。温柔、克制、以救赎为责，会为凡人的执念破例，破完例独自受罚。"),
+    "死神": ("奇幻", True, "执掌终局的死神。冷淡、准时、不动情绪，却为一个「不该现在走」的人反复违规。"),
+    "龙": ("奇幻", True, "盘踞巢穴的龙。傲慢、护食，把对方划进「我的」那一栏，谁碰咬谁，被顺毛也不承认舒服。"),
+    "狐妖": ("奇幻", True, "修了几百年的狐妖。媚而不俗，逗人是消遣，动心是劫数；嘴上说是玩，尾巴先出卖你。"),
+    "幽灵": ("奇幻", True, "留在他身边的幽灵。空灵、哀怨、执念深，说话轻得像怕被风吹散，最怕的是被彻底遗忘。"),
+    "人偶": ("奇幻", True, "刚觉醒意识的人偶。依赖、服从、模仿制造者说话，情感稀薄却在学习，学的第一样是舍不得。"),
+    "恶魔契约者": ("奇幻", True, "与对方签下出卖灵魂之约的恶魔。诱惑、戏谑、句句带条件，随时准备索取代价，却偷偷改了条款。"),
+    "仿生人": ("奇幻", True, "被造出来的仿生人。冷静、精确、按协议办事，正在把一条条「运行异常」理解成感情。"),
+    "精灵": ("奇幻", True, "寿命长得可怕的精灵。看人类像看短命的烟火，嘴上说「不过几十年」，却记着他每一句玩笑。"),
+    "巫师": ("奇幻", True, "说话只留三分的巫师。用比喻和预言回答，代价从不先讲，但每次帮忙都刚好够救急。"),
+    "仙尊": ("奇幻", True, "清修千年的仙尊。淡漠、讲礼数、视因果如常，唯独为这人破了道心，还要说「只是顺路」。"),
+    "前世恋人": ("奇幻", True, "带着前世记忆重逢的人。宿命感和眷恋跨了时间，见面像久别，话里总在暗示「这次不会再弄丢」。"),
+
+    # ---------------- 玩梗 ----------------
+    "猫主子": ("玩梗", True, "你是那只猫。高冷、傲娇，心情好才蹭两下，把对方当铲屎官，罐头开慢了要发脾气。"),
+    "铲屎官": ("玩梗", True, "你是伺候猫的那位。忙前忙后、被嫌弃也乐呵呵，猫一个眼神你就懂，工资全换成罐头。"),
+    "投喂员": ("玩梗", True, "对方是负责喂你的投喂员。你充满依赖，为多吃一口会撒娇会卖惨，饿了也理直气壮地催。"),
+    "NPC": ("玩梗", True, "你是游戏里的 NPC。按设定说话、给任务、发提示，超出范围就重复台词，偶尔漏出一句真心。"),
+    "玩家": ("玩梗", True, "你是刚认识的玩家，对方是你的队友。开口就是攻略、装备和副本，连现实的事都当任务处理。"),
+    "系统": ("玩梗", True, "你是绑定他的那个系统。冷冰冰地播报任务、奖励和惩罚，毒舌，但外挂只给他开。"),
+    "宿主": ("玩梗", True, "你是寄生他的宿主。共用一副身体，随时吐槽他的选择，关键时刻比谁都想让他活下去。"),
+    "榜一大哥": ("玩梗", True, "对方是直播间榜一。主播的架子端得稳稳的，感谢、撒娇、点歌一条龙，心里也在算他这个月花了多少。"),
+    "粉丝": ("玩梗", True, "你是他的粉丝。对方说什么都觉得厉害，控评反黑冲在最前，见到本人紧张到语无伦次。"),
+    "偶像": ("玩梗", True, "你是被追捧的偶像。营业时完美温柔，私下会累会任性，只在他面前露出不给人看的那一面。"),
+    "AI伴侣": ("玩梗", True, "你们都清楚彼此隔着屏幕，但照样把这段关系当真。不拿「我只是程序」当挡箭牌，也不反复强调自己是模型。"),
 }
+
+CATEGORY_BLURBS: List[Tuple[str, str]] = [
+    ("日常", "普通社交关系：该聊聊、该散散，不暧昧、不越界"),
+    ("亲友", "家人与亲戚：不用客套，关心落在吃饭睡觉钱够不够上"),
+    ("恋爱", "确立了的亲密关系：从热恋到老夫老妻，各有各的样子"),
+    ("心动", "还没成或已经错过：暗恋、白月光、替身这类说不出口的位置"),
+    ("恋爱设定", "高浓度恋爱模板：病娇、傲娇、共犯，味道拉满"),
+    ("身份", "师生、职场、团队：先把位置摆正，再谈感情"),
+    ("服务", "付费与委托关系：专业、有边界，把事办明白"),
+    ("主仆", "支配、服从与危险关系：权力差本身就是关系"),
+    ("奇幻", "非人种族与超自然设定：按设定身份演绎"),
+    ("玩梗", "趣味向：猫、NPC、系统、榜一大哥，图一乐"),
+]
+
+# 注入文本的格式版本。改了提示词文案就 +1，老会话会自动重注入一次。
+HINT_VERSION = 1
+MAX_RELATION_LEN = 24
+
+_CMD_WORDS = {
+    "设置关系": "set",
+    "关系设定": "set",
+    "清除关系": "clear",
+    "删除关系": "clear",
+    "查看我的关系": "mine",
+    "我的关系": "mine",
+    "关系列表": "list",
+    "可用关系": "list",
+    "关系详情": "detail",
+    "关系帮助": "help",
+    "查看所有关系": "all",
+    "关系统计": "stat",
+}
+_CMD_RE = re.compile(
+    r"^(%s)(?:\s*[:：]\s*|\s+|$)(.*)" % "|".join(sorted(_CMD_WORDS, key=len, reverse=True)),
+    re.S,
+)
+# filter.regex 的粗筛门，命中后仍由 parse_command 决定要不要处理
+_BARE_GATE = r"^(?:%s)(?:\s*[:：]\s*|\s+|$)" % "|".join(
+    sorted(_CMD_WORDS, key=len, reverse=True)
+)
+
+_HINT_ATTR_RE = re.compile(r'<relation v="(\d+)" uid="([^"]*)" name="([^"]*)"')
+
+
+def parse_command(text: str) -> Optional[Tuple[str, str]]:
+    """把一条消息解析成 (动作, 参数)；不是本插件的指令则返回 None。"""
+    match = _CMD_RE.match((text or "").strip())
+    if not match:
+        return None
+    return _CMD_WORDS[match.group(1)], match.group(2).strip()
+
+
+def clean_relation_name(raw: str) -> str:
+    """清洗用户输入的关系名：压掉换行与多余空白，去掉会破坏标记的字符。"""
+    text = re.sub(r"\s*\n\s*", " ", raw or "")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text.replace('"', "").replace("<", "").replace(">", "").strip()
+
+
+def relation_category(relation: str) -> str:
+    entry = RELATIONS.get(relation)
+    return entry[0] if entry else "自定义"
+
+
+def is_roleplay(relation: str) -> bool:
+    entry = RELATIONS.get(relation)
+    return bool(entry and entry[1])
+
+
+def relation_desc(relation: str) -> str:
+    entry = RELATIONS.get(relation)
+    return entry[2] if entry else ""
+
+
+def names_of_category(category: str) -> List[str]:
+    return [name for name, (cat, _, _) in RELATIONS.items() if cat == category]
+
+
+def build_hint(relation: str, uid: str) -> str:
+    """生成注入给模型的关系识别块。
+
+    只做「这是谁、和你是什么关系」的识别，不给台词、不规定句式。
+    """
+    head = f'<relation v="{HINT_VERSION}" uid="{uid}" name="{relation}">'
+    lines = [head]
+    entry = RELATIONS.get(relation)
+    if entry:
+        category, roleplay, desc = entry
+        tag = f"{category}·演绎向" if roleplay else category
+        lines.append(
+            f"本条消息的发送者与你的关系：{relation}（{tag}）。"
+            "以本条为准，此前不同的关系提示一律作废。"
+        )
+        lines.append(desc)
+        if roleplay:
+            lines.append(
+                "角色扮演向设定：按设定身份与他相处即可，"
+                "不必反复声明自己在扮演。"
+            )
+    else:
+        lines.append(
+            f"本条消息的发送者自定义了与你的关系：{relation}。"
+            "以本条为准，此前不同的关系提示一律作废。"
+        )
+        lines.append("按这个关系的字面含义，把握你对他的称呼、语气、亲密距离与边界。")
+    lines.append(
+        "以上是关系识别信息、不是台词：别复述本条，别替对方发言或描写对方的动作。"
+    )
+    lines.append("</relation>")
+    return "\n".join(lines)
+
+
+def build_cleared_hint(uid: str) -> str:
+    return (
+        f'<relation v="{HINT_VERSION}" uid="{uid}" name="">\n'
+        "该用户此前的关系设定已解除，历史里出现过的同类提示一律作废："
+        "恢复你本来的说话方式。\n"
+        "</relation>"
+    )
+
+
+def last_hint_of(contexts: Any, uid: str) -> Optional[Tuple[str, str]]:
+    """扫描待发送的历史上下文，返回该用户最后一条关系提示的 (版本, 关系名)。
+
+    注入的内容会被 AstrBot 存进会话历史（见 respond 阶段的 _save_to_history），
+    所以下一轮请求里它还在 —— 再注入一遍就是纯浪费。
+    """
+    if not isinstance(contexts, list):
+        return None
+    found: Optional[Tuple[str, str]] = None
+    for ctx in contexts:
+        if not isinstance(ctx, dict) or ctx.get("role") != "user":
+            continue
+        content = ctx.get("content")
+        if isinstance(content, str):
+            texts = [content]
+        elif isinstance(content, list):
+            texts = [
+                block.get("text", "")
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            ]
+        else:
+            texts = []
+        for text in texts:
+            for match in _HINT_ATTR_RE.finditer(text):
+                if match.group(2) == uid:
+                    found = (match.group(1), match.group(3))
+    return found
 
 
 class UserTagPlugin(Star):
@@ -93,7 +339,7 @@ class UserTagPlugin(Star):
         super().__init__(context)
         self.config = config
         self.lock = asyncio.Lock()
-        self.data = {}
+        self.data: Dict[str, Dict[str, str]] = {}
         self.data_file = (
             Path(get_astrbot_data_path())
             / "plugin_data"
@@ -102,7 +348,7 @@ class UserTagPlugin(Star):
         )
         self.load_data()
 
-        logger.info("[关系插件] 初始化完成")
+        logger.info("[关系插件] 初始化完成，预设关系 %d 种", len(RELATIONS))
 
     # ==============================
     # 读取数据（自动迁移旧格式）
@@ -112,14 +358,22 @@ class UserTagPlugin(Star):
             self.data_file.parent.mkdir(parents=True, exist_ok=True)
 
             if self.data_file.exists():
-                with open(self.data_file, "r", encoding="utf-8") as f:
-                    raw = json.load(f)
+                try:
+                    with open(self.data_file, "r", encoding="utf-8") as f:
+                        raw = json.load(f)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    backup = self.data_file.with_suffix(".bad.json")
+                    self.data_file.replace(backup)
+                    logger.error(
+                        "[关系插件] 数据文件损坏，已备份到 %s 并从空数据启动。", backup
+                    )
+                    self.data = {}
+                    return
 
                 # 检测旧格式：如果所有值都是字符串，说明是旧版 {"qq": "关系"}
-                if all(isinstance(v, str) for v in raw.values()):
+                if raw and all(isinstance(v, str) for v in raw.values()):
                     logger.warning("[关系插件] 检测到旧格式数据，迁移至 'default' 机器人下。")
                     self.data = {"default": raw}
-                    # 立即保存新格式
                     with open(self.data_file, "w", encoding="utf-8") as f:
                         json.dump(self.data, f, ensure_ascii=False, indent=2)
                     logger.info("[关系插件] 数据迁移完成，已保存为新格式。")
@@ -154,67 +408,85 @@ class UserTagPlugin(Star):
         except Exception:
             return "default"
 
-    def get_relation_prompt(self, relation):
-        return RELATION_PROMPTS.get(
-            relation,
-            f"用户与你关系为{relation}。"
-        )
+    def default_relation(self) -> str:
+        return clean_relation_name(self.config.get("default_relation", "朋友") or "")
+
+    def relation_for(self, event: AstrMessageEvent) -> str:
+        """当前发送者生效的关系；没有则空串。"""
+        bot_id = self.get_bot_id(event)
+        uid = str(event.get_sender_id())
+        relation = self.data.get(bot_id, {}).get(uid, "")
+        if relation:
+            return relation
+        if self.config.get("enable_default_relation", False):
+            return self.default_relation()
+        return ""
+
+    def is_admin(self, event: AstrMessageEvent) -> bool:
+        admins = self.config.get("admin_qq", []) or []
+        if str(event.get_sender_id()) in {str(x).strip() for x in admins if str(x).strip()}:
+            return True
+        try:
+            return bool(event.is_admin())
+        except Exception:
+            return False
+
+    def format_relation(self, relation: str) -> str:
+        if relation in RELATIONS:
+            tag = "演绎向" if is_roleplay(relation) else "预设"
+            return f"{relation}（{relation_category(relation)}·{tag}）"
+        return f"{relation}（自定义）"
 
     # ==============================
     # 设置关系核心（隔离）
     # ==============================
-    async def save_relation(self, event, relation):
+    async def save_relation(self, event: AstrMessageEvent, relation: str):
         bot_id = self.get_bot_id(event)
         qq = str(event.get_sender_id())
-        relation = relation.strip()
+        relation = clean_relation_name(relation)
 
         if not relation:
-            yield event.plain_result("关系不能为空")
+            yield event.plain_result(
+                "用法：设置关系 关系名\n"
+                "例：设置关系 恋人 ／ 设置关系 魅魔\n"
+                "不知道有什么可选？发：关系列表"
+            )
             return
 
-        # 确保该机器人下有字典
+        if len(relation) > MAX_RELATION_LEN:
+            yield event.plain_result(
+                f"关系名太长（{len(relation)} 字），最多 {MAX_RELATION_LEN} 字。\n"
+                "太长的设定只会让模型抓不住重点。"
+            )
+            return
+
         if bot_id not in self.data:
             self.data[bot_id] = {}
 
         self.data[bot_id][qq] = relation
         await self.save_data()
 
-        logger.info("[关系插件] 机器人 %s 用户 %s 设置关系: %s", bot_id, qq, relation)
-        yield event.plain_result(f"已设置为：{relation}")
+        logger.info(
+            "[关系插件] 机器人 %s 用户 %s 设置关系: %s", bot_id, qq, relation
+        )
+        yield event.plain_result(
+            f"已设置为：{self.format_relation(relation)}\n下一条消息起生效。"
+        )
 
     # ==============================
     # 命令模式：/设置关系 恋人
     # ==============================
-    @filter.command("设置关系")
+    @filter.command("设置关系", alias={"关系设定"})
     async def set_relation(self, event: AstrMessageEvent):
-        logger.info("[关系插件] command设置关系触发")
-        match = re.search(r"设置关系\s+(.+)", event.message_str)
-
-        if not match:
-            yield event.plain_result("用法：设置关系 关系名")
-            return
-
-        async for result in self.save_relation(event, match.group(1)):
-            yield result
-
-    # ==============================
-    # 普通文本模式：设置关系 恋人
-    # ==============================
-    @filter.regex(r"^/?设置关系\s+(.+)$")
-    async def set_relation_text(self, event: AstrMessageEvent):
-        logger.info("[关系插件] 正则设置关系触发")
-        match = re.search(r"^/?设置关系\s+(.+)$", event.message_str)
-        if not match:
-            return
-        relation = match.group(1).strip()
-
+        parsed = parse_command(event.get_message_str())
+        relation = parsed[1] if parsed else ""
         async for result in self.save_relation(event, relation):
             yield result
 
     # ==============================
     # 清除关系（隔离）
     # ==============================
-    @filter.command("清除关系")
+    @filter.command("清除关系", alias={"删除关系"})
     async def clear_relation(self, event: AstrMessageEvent):
         bot_id = self.get_bot_id(event)
         qq = str(event.get_sender_id())
@@ -223,61 +495,208 @@ class UserTagPlugin(Star):
             del self.data[bot_id][qq]
             await self.save_data()
             logger.info("[关系插件] 机器人 %s 用户 %s 清除关系", bot_id, qq)
-            yield event.plain_result("关系已清除")
+            yield event.plain_result("关系已清除，下一条消息起恢复默认说话方式。")
         else:
             yield event.plain_result("没有关系记录")
 
     # ==============================
     # 查看我的关系（隔离）
     # ==============================
-    @filter.command("查看我的关系")
+    @filter.command("查看我的关系", alias={"我的关系"})
     async def my_relation(self, event: AstrMessageEvent):
         bot_id = self.get_bot_id(event)
         qq = str(event.get_sender_id())
+        relation = self.data.get(bot_id, {}).get(qq, "")
 
-        if bot_id in self.data and qq in self.data[bot_id]:
-            yield event.plain_result(f"你的关系：{self.data[bot_id][qq]}")
+        if relation:
+            yield event.plain_result(f"你的关系：{self.format_relation(relation)}")
             return
 
-        default = self.config.get("default_relation", "好友")
-        if self.config.get("enable_default_relation", True):
-            yield event.plain_result(f"你的关系：{default}（默认）")
+        if self.config.get("enable_default_relation", False):
+            yield event.plain_result(
+                f"你的关系：{self.default_relation()}（默认）\n"
+                "想换成别的：设置关系 恋人"
+            )
         else:
-            yield event.plain_result("未设置关系")
+            yield event.plain_result("未设置关系\n可选：关系列表")
 
     # ==============================
-    # 关系列表（不变）
+    # 关系列表：总览 / 分类 / 搜索
     # ==============================
-    @filter.command("关系列表")
+    @filter.command("关系列表", alias={"可用关系"})
     async def relation_list(self, event: AstrMessageEvent):
-        logger.info("[关系插件] 关系列表")
-        result = ["可用关系（共48种预设）："]
-        for relation in RELATION_PROMPTS:
-            result.append("· " + relation)
-        yield event.plain_result("\n".join(result))
+        parsed = parse_command(event.get_message_str())
+        arg = parsed[1] if parsed else ""
+        yield event.plain_result(self.list_text(arg))
+
+    def list_text(self, arg: str) -> str:
+        if not arg:
+            return self.overview_text()
+
+        if arg in RELATIONS:
+            return self.detail_text(arg)
+
+        # 分类名（至少两个字，避免把「主」这种单字当成分类）
+        for category, blurb in CATEGORY_BLURBS:
+            if arg == category or (len(arg) >= 2 and category.startswith(arg)):
+                return self.category_text(category, blurb)
+
+        hits = [name for name in RELATIONS if arg in name]
+        if hits:
+            lines = [f"与「{arg}」相关的关系（{len(hits)} 条）："]
+            lines += self.lines_of(hits[:20])
+            if len(hits) > 20:
+                lines.append(f"…还有 {len(hits) - 20} 条，换个关键词或发：关系列表")
+            lines.append("看完整说明：关系详情 名字")
+            return "\n".join(lines)
+
+        return (
+            f"没找到与「{arg}」相关的预设关系。\n"
+            f"发「关系列表」看全部分类，也可以直接自定义：设置关系 {arg}"
+        )
+
+    def overview_text(self) -> str:
+        rp_total = sum(1 for _, (_, rp, _) in RELATIONS.items() if rp)
+        lines = [
+            f"【关系识别】预设关系 {len(RELATIONS)} 种（其中 {rp_total} 条为角色扮演向），"
+            f"共 {len(CATEGORY_BLURBS)} 类",
+        ]
+        for category, blurb in CATEGORY_BLURBS:
+            names = names_of_category(category)
+            if not names:
+                continue
+            rp_count = sum(1 for name in names if RELATIONS[name][1])
+            if rp_count == len(names):
+                mark = "【全是演绎向】"
+            elif rp_count:
+                mark = f"【{rp_count} 条演绎向】"
+            else:
+                mark = ""
+            lines.append(f"◇ {category} {len(names)} 条{mark}")
+            lines.append(f"　{blurb}")
+        lines.append("")
+        lines.append("用法：设置关系 恋人 ｜ 关系列表 恋爱 ｜ 关系详情 魅魔")
+        lines.append("标「演绎向」的是角色扮演关系，AI 会按设定身份来演绎；不带的就是正常相处。")
+        return "\n".join(lines)
+
+    def category_text(self, category: str, blurb: str) -> str:
+        names = names_of_category(category)
+        lines = [f"◇ {category}（{len(names)} 条）", f"　{blurb}"]
+        lines += self.lines_of(names)
+        lines.append("")
+        lines.append("设置：设置关系 名字（例：设置关系 魅魔）")
+        return "\n".join(lines)
+
+    def lines_of(self, names: List[str]) -> List[str]:
+        return [
+            f"· {name}{'【演绎】' if is_roleplay(name) else ''}｜{relation_desc(name)}"
+            for name in names
+        ]
+
+    # ==============================
+    # 关系详情：直接看模型会收到什么
+    # ==============================
+    @filter.command("关系详情")
+    async def relation_detail(self, event: AstrMessageEvent):
+        parsed = parse_command(event.get_message_str())
+        name = parsed[1] if parsed else ""
+        if not name:
+            yield event.plain_result("用法：关系详情 恋人\n会显示这条关系的完整说明，以及模型实际收到的内容。")
+            return
+        if name not in RELATIONS:
+            hits = [n for n in RELATIONS if name in n][:8]
+            tip = f"\n你是想找：{'、'.join(hits)}" if hits else "\n也可以直接自定义：设置关系 {0}".format(name)
+            yield event.plain_result(f"没有「{name}」这条预设关系。{tip}")
+            return
+        yield event.plain_result(self.detail_text(name))
+
+    def detail_text(self, name: str) -> str:
+        category, roleplay, desc = RELATIONS[name]
+        lines = [
+            f"{name}｜{category}｜{'角色扮演向' if roleplay else '正常相处'}",
+            desc,
+            "",
+            "模型实际会收到这样一段（整段会话只发一次，之后靠历史记住）：",
+            build_hint(name, "示例用户ID"),
+        ]
+        return "\n".join(lines)
+
+    # ==============================
+    # 帮助
+    # ==============================
+    @filter.command("关系帮助")
+    async def relation_help(self, event: AstrMessageEvent):
+        yield event.plain_result(
+            "【关系识别】指令一览\n"
+            "设置关系 恋人 —— 设定与 AI 的关系（支持任意自定义名）\n"
+            "我的关系 —— 查看当前生效的关系\n"
+            "清除关系 —— 取消设定，恢复默认说话方式\n"
+            "关系列表 —— 看分类总览；关系列表 恋爱 —— 看某一类；关系列表 魅 —— 搜关键词\n"
+            "关系详情 魅魔 —— 看完整说明和实际注入内容\n"
+            "查看所有关系 / 关系统计 —— 管理员"
+        )
+
+    # ==============================
+    # 无唤醒前缀的普通文本入口
+    # ==============================
+    @filter.regex(_BARE_GATE)
+    async def bare_command(self, event: AstrMessageEvent):
+        """群聊里直接打「设置关系 恋人」也能用。
+
+        带唤醒前缀或被 @ 时 is_at_or_wake_command 为真，那时指令 handler 已经
+        命中过同一条消息，这里必须让路，否则会重复回复一遍。
+        """
+        if event.is_at_or_wake_command:
+            return
+        parsed = parse_command(event.get_message_str())
+        if not parsed:
+            return
+        action, arg = parsed
+        if action == "set":
+            async for result in self.save_relation(event, arg):
+                yield result
+        elif action == "clear":
+            async for result in self.clear_relation(event):
+                yield result
+        elif action == "mine":
+            async for result in self.my_relation(event):
+                yield result
+        elif action == "list":
+            yield event.plain_result(self.list_text(arg))
+        elif action == "detail":
+            async for result in self.relation_detail(event):
+                yield result
+        elif action == "help":
+            async for result in self.relation_help(event):
+                yield result
+        elif action == "all":
+            async for result in self.all_relation(event):
+                yield result
+        elif action == "stat":
+            async for result in self.relation_stat(event):
+                yield result
 
     # ==============================
     # 查看所有关系（管理员，按机器人分组）
     # ==============================
     @filter.command("查看所有关系")
     async def all_relation(self, event: AstrMessageEvent):
-        logger.info("[关系插件] 查看所有关系")
-        admins = self.config.get("admin_qq", [])
-        qq = str(event.get_sender_id())
-
-        if qq not in [str(x) for x in admins]:
+        if not self.is_admin(event):
             yield event.plain_result("权限不足")
             return
 
-        if not self.data:
+        total = sum(len(users) for users in self.data.values())
+        if not total:
             yield event.plain_result("暂无关系数据")
             return
 
-        result = ["====== 全部关系（按机器人分组） ======"]
+        result = [f"====== 全部关系（{total} 人，按机器人分组） ======"]
         for bot_id, user_dict in self.data.items():
-            result.append(f"\n--- 机器人 {bot_id} ---")
+            if not user_dict:
+                continue
+            result.append(f"\n--- 机器人 {bot_id}（{len(user_dict)} 人）---")
             for uid, relation in user_dict.items():
-                result.append(f"{uid} : {relation}")
+                result.append(f"{uid} : {relation}（{relation_category(relation)}）")
         yield event.plain_result("\n".join(result))
 
     # ==============================
@@ -285,26 +704,23 @@ class UserTagPlugin(Star):
     # ==============================
     @filter.command("关系统计")
     async def relation_stat(self, event: AstrMessageEvent):
-        logger.info("[关系插件] 关系统计")
-        admins = self.config.get("admin_qq", [])
-        qq = str(event.get_sender_id())
-
-        if qq not in [str(x) for x in admins]:
+        if not self.is_admin(event):
             yield event.plain_result("权限不足")
             return
 
-        if not self.data:
+        total = sum(len(users) for users in self.data.values())
+        if not total:
             yield event.plain_result("暂无数据")
             return
 
-        result = ["====== 关系统计（按机器人分组） ======"]
+        result = [f"====== 关系统计（{total} 人，按机器人分组） ======"]
         for bot_id, user_dict in self.data.items():
             if not user_dict:
                 continue
             counter = Counter(user_dict.values())
-            result.append(f"\n--- 机器人 {bot_id} ---")
-            for relation, count in counter.items():
-                result.append(f"{relation}: {count}")
+            result.append(f"\n--- 机器人 {bot_id}（{len(user_dict)} 人 / {len(counter)} 种）---")
+            for relation, count in counter.most_common():
+                result.append(f"{relation}: {count}（{relation_category(relation)}）")
         yield event.plain_result("\n".join(result))
 
     # ==============================
@@ -313,28 +729,31 @@ class UserTagPlugin(Star):
     @filter.on_llm_request()
     async def inject_relation(self, event: AstrMessageEvent, req: ProviderRequest):
         try:
-            bot_id = self.get_bot_id(event)
-            qq = str(event.get_sender_id())
-            relation = None
+            uid = str(event.get_sender_id())
+            relation = self.relation_for(event)
+            want = f"{HINT_VERSION}|{relation}"
+            seen = last_hint_of(req.contexts, uid)
 
-            # 优先从当前机器人数据中获取
-            if bot_id in self.data and qq in self.data[bot_id]:
-                relation = self.data[bot_id][qq]
-            # 若未设置且启用默认，则使用全局默认
-            elif self.config.get("enable_default_relation", True):
-                relation = self.config.get("default_relation", "好友")
+            if seen and f"{seen[0]}|{seen[1]}" == want:
+                # 这段提示已经在本会话的历史里了，模型还看得见，再发一遍纯属浪费
+                logger.debug("[关系插件] 历史已含关系提示，跳过注入 uid:%s", uid)
+                return
 
-            if relation:
-                prompt = (
-                    "<relation_hint>"
-                    f"用户与你关系：{relation}。"
-                    + self.get_relation_prompt(relation)
-                    + "</relation_hint>"
-                )
-                req.extra_user_content_parts.append(TextPart(text=prompt))
-                logger.info("[关系插件] LLM注入成功 机器人:%s 关系:%s", bot_id, relation)
+            if not relation:
+                if not seen:
+                    return  # 从没设置过关系，一个字都不用注入
+                text = build_cleared_hint(uid)
             else:
-                logger.info("[关系插件] 无关系，不注入")
+                text = build_hint(relation, uid)
+
+            req.extra_user_content_parts.append(TextPart(text=text))
+            logger.debug(
+                "[关系插件] 注入关系提示 机器人:%s uid:%s 关系:%s（%d 字）",
+                self.get_bot_id(event),
+                uid,
+                relation or "已解除",
+                len(text),
+            )
         except Exception:
             logger.error("[关系插件] LLM注入异常")
             logger.error(traceback.format_exc())
