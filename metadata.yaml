@@ -1,0 +1,27 @@
+name: astrbot_plugin_humanoid_core
+display_name: 人形化伴侣插件
+short_desc: 给她一天要过的日子：说得出在忙什么，也记得你说过什么。
+desc: |
+  人设是一段文字，日子不是。
+
+  她按自己那份人设过一天：熬了夜会欠觉，到点会饿，说得出刚在忙什么；你说过的事她记得，过一阵会
+  主动问后来。不配模型也有身体，配了才有每天新日程。不用配置，不装别的插件也完全能用。
+version: 2.15.0
+author: 娜莉灵
+repo: https://github.com/naliling/humanoid_core_plugin
+astrbot_version: ">=4.0.0"
+support_platforms:
+  - aiocqhttp
+  - qq_official
+tags:
+  - 拟真
+  - 生理拟人
+  - 具身
+  - 人设日程
+  - 情绪
+  - 记忆
+  - 时间
+  - 位置地区
+  - 自身能量
+  - 睡眠
+  - 天气
