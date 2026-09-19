@@ -19,6 +19,13 @@ except Exception as e:
     logger.error(f"[关系插件] 导入失败:{e}")
     raise
 
+try:
+    from astrbot.api.message.components import At, Plain
+except Exception as e:
+    logger.warning(f"[关系插件] 消息组件导入失败，@代管与标记剥离不可用:{e}")
+    At = None
+    Plain = None
+
 logger.info("[关系插件] main.py 已加载")
 
 # ==============================
@@ -225,6 +232,13 @@ _BARE_GATE = r"^(?:%s)(?:\s*[:：]\s*|\s+|$)" % "|".join(
 
 _HINT_ATTR_RE = re.compile(r'<relation v="(\d+)" uid="([^"]*)" name="([^"]*)"')
 
+# AI 自动认定：注入提示的标记（进历史，靠 round 去重）与模型回复里的落库标记
+_AUTO_PROMPT_RE = re.compile(r'<relation_auto v="(\d+)" uid="([^"]*)" round="(\d+)"')
+_AUTO_MARKER_RE = re.compile(r"<auto_relation>\s*(.*?)\s*</auto_relation>", re.S)
+AUTO_PROMPT_VERSION = 1
+
+SESSION_DENIED_TEXT = "本会话未启用关系功能（管理员可在插件配置里调整会话黑白名单）。"
+
 
 def parse_command(text: str) -> Optional[Tuple[str, str]]:
     """把一条消息解析成 (动作, 参数)；不是本插件的指令则返回 None。"""
@@ -303,6 +317,29 @@ def build_cleared_hint(uid: str) -> str:
     )
 
 
+def auto_candidates() -> str:
+    """自动认定允许选的名单：只给非演绎向预设，避免 AI 自己给自己加戏。"""
+    return "、".join(name for name, (_, rp, _) in RELATIONS.items() if not rp)
+
+
+def build_auto_prompt(uid: str, round_no: int) -> str:
+    head = f'<relation_auto v="{AUTO_PROMPT_VERSION}" uid="{uid}" round="{round_no}">'
+    return "\n".join(
+        [
+            head,
+            "这位用户还没有与你确定关系设定，而你们已经聊过一段时间了。",
+            "请根据你们实际的聊天内容，从下面的预设关系里选出「目前最贴切的一个」：",
+            auto_candidates(),
+            "要求：",
+            "- 只能从上面名单里选，名字逐字照抄；",
+            "- 确实判断不出来就不要选，什么都不用做；",
+            "- 选定了就在这条回复的最末尾另起一行输出：<auto_relation>关系名</auto_relation>",
+            "- 不要向用户解释这套流程，不要复述本段。",
+            "</relation_auto>",
+        ]
+    )
+
+
 def last_hint_of(contexts: Any, uid: str) -> Optional[Tuple[str, str]]:
     """扫描待发送的历史上下文，返回该用户最后一条关系提示的 (版本, 关系名)。
 
@@ -333,13 +370,43 @@ def last_hint_of(contexts: Any, uid: str) -> Optional[Tuple[str, str]]:
     return found
 
 
+def last_auto_round_of(contexts: Any, uid: str) -> Optional[int]:
+    """扫描历史，返回该用户最后一次自动认定提示的轮次；没有则 None。"""
+    if not isinstance(contexts, list):
+        return None
+    found: Optional[int] = None
+    for ctx in contexts:
+        if not isinstance(ctx, dict) or ctx.get("role") != "user":
+            continue
+        content = ctx.get("content")
+        if isinstance(content, str):
+            texts = [content]
+        elif isinstance(content, list):
+            texts = [
+                block.get("text", "")
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            ]
+        else:
+            texts = []
+        for text in texts:
+            for match in _AUTO_PROMPT_RE.finditer(text):
+                if match.group(2) == uid:
+                    found = int(match.group(3))
+    return found
+
+
 class UserTagPlugin(Star):
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
         self.lock = asyncio.Lock()
+        # relations：bot -> uid -> 关系名；src：bot -> uid -> 来源（缺省视为 user）
+        # auto：bot -> uid -> {"msgs": 未设关系时的累计轮数, "rounds": 已注入认定提示的次数}
         self.data: Dict[str, Dict[str, str]] = {}
+        self.src: Dict[str, Dict[str, str]] = {}
+        self.auto: Dict[str, Dict[str, Dict[str, int]]] = {}
         self.data_file = (
             Path(get_astrbot_data_path())
             / "plugin_data"
@@ -348,10 +415,14 @@ class UserTagPlugin(Star):
         )
         self.load_data()
 
-        logger.info("[关系插件] 初始化完成，预设关系 %d 种", len(RELATIONS))
+        logger.info(
+            "[关系插件] 初始化完成，预设关系 %d 种，已有数据 %d 个机器人",
+            len(RELATIONS),
+            len(self.data),
+        )
 
     # ==============================
-    # 读取数据（自动迁移旧格式）
+    # 读取数据（v2 格式 relations/src/auto；自动迁移旧格式）
     # ==============================
     def load_data(self):
         try:
@@ -368,24 +439,52 @@ class UserTagPlugin(Star):
                         "[关系插件] 数据文件损坏，已备份到 %s 并从空数据启动。", backup
                     )
                     self.data = {}
+                    self.src = {}
+                    self.auto = {}
                     return
 
-                # 检测旧格式：如果所有值都是字符串，说明是旧版 {"qq": "关系"}
+                if isinstance(raw, dict) and isinstance(raw.get("relations"), dict):
+                    self.data = raw["relations"]
+                    self.src = raw.get("src") or {}
+                    self.auto = raw.get("auto") or {}
+                    logger.info("[关系插件] 读取数据成功，共 %d 个机器人", len(self.data))
+                    return
+
+                # 旧格式：{"机器人": {"QQ": "关系"}} 或更早的 {"QQ": "关系"}
                 if raw and all(isinstance(v, str) for v in raw.values()):
                     logger.warning("[关系插件] 检测到旧格式数据，迁移至 'default' 机器人下。")
-                    self.data = {"default": raw}
-                    with open(self.data_file, "w", encoding="utf-8") as f:
-                        json.dump(self.data, f, ensure_ascii=False, indent=2)
-                    logger.info("[关系插件] 数据迁移完成，已保存为新格式。")
+                    migrated = {"default": raw}
                 else:
-                    self.data = raw
-
+                    migrated = raw or {}
+                self.data = {
+                    str(bot): {str(uid): str(rel) for uid, rel in users.items()}
+                    for bot, users in migrated.items()
+                    if isinstance(users, dict)
+                }
+                self.src = {}
+                self.auto = {}
+                try:
+                    with open(self.data_file, "w", encoding="utf-8") as f:
+                        json.dump(
+                            {"relations": self.data, "src": {}, "auto": {}},
+                            f,
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    logger.info("[关系插件] 已迁移到 v2 数据格式并保存。")
+                except Exception:
+                    logger.error("[关系插件] 迁移后写盘失败（下次保存时会重试）")
+                    logger.error(traceback.format_exc())
                 logger.info("[关系插件] 读取数据成功，共 %d 个机器人", len(self.data))
             else:
                 self.data = {}
+                self.src = {}
+                self.auto = {}
         except Exception:
             logger.error(traceback.format_exc())
             self.data = {}
+            self.src = {}
+            self.auto = {}
 
     # ==============================
     # 保存数据
@@ -394,9 +493,97 @@ class UserTagPlugin(Star):
         try:
             async with self.lock:
                 with open(self.data_file, "w", encoding="utf-8") as f:
-                    json.dump(self.data, f, ensure_ascii=False, indent=2)
+                    json.dump(
+                        {"relations": self.data, "src": self.src, "auto": self.auto},
+                        f,
+                        ensure_ascii=False,
+                        indent=2,
+                    )
         except Exception:
             logger.error(traceback.format_exc())
+
+    # ==============================
+    # 会话黑白名单
+    # ==============================
+    def session_key(self, event: AstrMessageEvent) -> str:
+        """会话标识：群聊用群号，私聊用对方 QQ。"""
+        try:
+            gid = event.get_group_id()
+            if gid:
+                return str(gid)
+        except Exception:
+            pass
+        return str(event.get_sender_id())
+
+    def session_allowed(self, event: AstrMessageEvent) -> bool:
+        mode = str(self.config.get("session_filter_mode", "off") or "off").strip()
+        if mode not in ("whitelist", "blacklist"):
+            return True
+        entries = {
+            str(x).strip()
+            for x in (self.config.get("session_list", []) or [])
+            if str(x).strip()
+        }
+        key = self.session_key(event)
+        if mode == "whitelist":
+            return key in entries
+        return key not in entries
+
+    # ==============================
+    # AI 自动认定关系
+    # ==============================
+    def auto_relation_enabled(self) -> bool:
+        return bool(self.config.get("auto_relation_enabled", True))
+
+    def auto_after_messages(self) -> int:
+        try:
+            return max(1, int(self.config.get("auto_relation_after_messages", 12)))
+        except (TypeError, ValueError):
+            return 12
+
+    def auto_max_attempts(self) -> int:
+        try:
+            return max(1, int(self.config.get("auto_relation_max_attempts", 3)))
+        except (TypeError, ValueError):
+            return 3
+
+    def auto_notify_enabled(self) -> bool:
+        return bool(self.config.get("auto_relation_notify", True))
+
+    def auto_meta(self, bot_id: str, uid: str) -> Dict[str, int]:
+        return self.auto.setdefault(bot_id, {}).setdefault(uid, {"msgs": 0, "rounds": 0})
+
+    # ==============================
+    # 关系来源与 @ 代管
+    # ==============================
+    SOURCE_LABELS = {"user": "自己设置", "admin": "管理员设置", "auto": "AI 自动认定"}
+
+    def source_of(self, bot_id: str, uid: str) -> str:
+        return self.src.get(bot_id, {}).get(uid, "user")
+
+    def set_source(self, bot_id: str, uid: str, source: str):
+        if source == "user":
+            self.src.get(bot_id, {}).pop(uid, None)
+        else:
+            self.src.setdefault(bot_id, {})[uid] = source
+
+    def at_target(self, event: AstrMessageEvent) -> Optional[str]:
+        """消息里第一个被 @ 的用户 QQ（跳过 @全体成员与机器人自己）；没有则 None。"""
+        if At is None:
+            return None
+        try:
+            self_id = str(event.get_self_id() or "")
+            for seg in event.message_obj.message or []:
+                qq = getattr(seg, "qq", None)
+                if qq in (None, "", "all", "here"):
+                    continue
+                qq = str(qq)
+                if qq == self_id:
+                    continue
+                return qq
+        except Exception:
+            return None
+        return None
 
     # ==============================
     # 获取当前机器人ID
@@ -438,19 +625,31 @@ class UserTagPlugin(Star):
         return f"{relation}（自定义）"
 
     # ==============================
-    # 设置关系核心（隔离）
+    # 设置关系核心（隔离；target_uid 非空时为管理员代管）
     # ==============================
-    async def save_relation(self, event: AstrMessageEvent, relation: str):
+    async def save_relation(
+        self, event: AstrMessageEvent, relation: str, target_uid: Optional[str] = None
+    ):
         bot_id = self.get_bot_id(event)
-        qq = str(event.get_sender_id())
+        sender = str(event.get_sender_id())
+        qq = target_uid or sender
         relation = clean_relation_name(relation)
+        if target_uid:
+            relation = re.sub(r"^@\S+\s*", "", relation).strip()
+
+        if target_uid and not self.is_admin(event):
+            yield event.plain_result("只有管理员可以帮别人设置关系。")
+            return
 
         if not relation:
-            yield event.plain_result(
-                "用法：设置关系 关系名\n"
-                "例：设置关系 恋人 ／ 设置关系 魅魔\n"
-                "不知道有什么可选？发：关系列表"
-            )
+            if target_uid:
+                yield event.plain_result("用法：设置关系 @某人 关系名\n例：设置关系 @张三 恋人")
+            else:
+                yield event.plain_result(
+                    "用法：设置关系 关系名\n"
+                    "例：设置关系 恋人 ／ 设置关系 魅魔\n"
+                    "不知道有什么可选？发：关系列表"
+                )
             return
 
         if len(relation) > MAX_RELATION_LEN:
@@ -464,23 +663,37 @@ class UserTagPlugin(Star):
             self.data[bot_id] = {}
 
         self.data[bot_id][qq] = relation
+        self.set_source(bot_id, qq, "user" if qq == sender else "admin")
         await self.save_data()
 
         logger.info(
-            "[关系插件] 机器人 %s 用户 %s 设置关系: %s", bot_id, qq, relation
+            "[关系插件] 机器人 %s 用户 %s 设置关系: %s（来源：%s）",
+            bot_id,
+            qq,
+            relation,
+            self.source_of(bot_id, qq),
         )
-        yield event.plain_result(
-            f"已设置为：{self.format_relation(relation)}\n下一条消息起生效。"
-        )
+        if qq == sender:
+            yield event.plain_result(
+                f"已设置为：{self.format_relation(relation)}\n下一条消息起生效。"
+            )
+        else:
+            yield event.plain_result(
+                f"已将用户 {qq} 的关系设置为：{self.format_relation(relation)}\n下一条消息起生效。"
+            )
 
     # ==============================
     # 命令模式：/设置关系 恋人
     # ==============================
     @filter.command("设置关系", alias={"关系设定"})
     async def set_relation(self, event: AstrMessageEvent):
+        if not self.session_allowed(event):
+            yield event.plain_result(SESSION_DENIED_TEXT)
+            return
         parsed = parse_command(event.get_message_str())
         relation = parsed[1] if parsed else ""
-        async for result in self.save_relation(event, relation):
+        target = self.at_target(event)
+        async for result in self.save_relation(event, relation, target):
             yield result
 
     # ==============================
@@ -488,14 +701,29 @@ class UserTagPlugin(Star):
     # ==============================
     @filter.command("清除关系", alias={"删除关系"})
     async def clear_relation(self, event: AstrMessageEvent):
+        if not self.session_allowed(event):
+            yield event.plain_result(SESSION_DENIED_TEXT)
+            return
+        target = self.at_target(event)
         bot_id = self.get_bot_id(event)
-        qq = str(event.get_sender_id())
+        qq = target or str(event.get_sender_id())
+
+        if target and not self.is_admin(event):
+            yield event.plain_result("只有管理员可以帮别人清除关系。")
+            return
+
+        # 主动清除（含本来就没设置的）= 明确拒绝，不再自动认定
+        self.auto_meta(bot_id, qq)["rounds"] = self.auto_max_attempts()
 
         if bot_id in self.data and qq in self.data[bot_id]:
             del self.data[bot_id][qq]
+            self.set_source(bot_id, qq, "user")
             await self.save_data()
             logger.info("[关系插件] 机器人 %s 用户 %s 清除关系", bot_id, qq)
-            yield event.plain_result("关系已清除，下一条消息起恢复默认说话方式。")
+            if target:
+                yield event.plain_result(f"已清除用户 {qq} 的关系，下一条消息起恢复默认说话方式。")
+            else:
+                yield event.plain_result("关系已清除，下一条消息起恢复默认说话方式。")
         else:
             yield event.plain_result("没有关系记录")
 
@@ -504,12 +732,16 @@ class UserTagPlugin(Star):
     # ==============================
     @filter.command("查看我的关系", alias={"我的关系"})
     async def my_relation(self, event: AstrMessageEvent):
+        if not self.session_allowed(event):
+            yield event.plain_result(SESSION_DENIED_TEXT)
+            return
         bot_id = self.get_bot_id(event)
         qq = str(event.get_sender_id())
         relation = self.data.get(bot_id, {}).get(qq, "")
 
         if relation:
-            yield event.plain_result(f"你的关系：{self.format_relation(relation)}")
+            label = self.SOURCE_LABELS.get(self.source_of(bot_id, qq), "自己设置")
+            yield event.plain_result(f"你的关系：{self.format_relation(relation)}（{label}）")
             return
 
         if self.config.get("enable_default_relation", False):
@@ -525,6 +757,9 @@ class UserTagPlugin(Star):
     # ==============================
     @filter.command("关系列表", alias={"可用关系"})
     async def relation_list(self, event: AstrMessageEvent):
+        if not self.session_allowed(event):
+            yield event.plain_result(SESSION_DENIED_TEXT)
+            return
         parsed = parse_command(event.get_message_str())
         arg = parsed[1] if parsed else ""
         yield event.plain_result(self.list_text(arg))
@@ -598,6 +833,9 @@ class UserTagPlugin(Star):
     # ==============================
     @filter.command("关系详情")
     async def relation_detail(self, event: AstrMessageEvent):
+        if not self.session_allowed(event):
+            yield event.plain_result(SESSION_DENIED_TEXT)
+            return
         parsed = parse_command(event.get_message_str())
         name = parsed[1] if parsed else ""
         if not name:
@@ -626,14 +864,19 @@ class UserTagPlugin(Star):
     # ==============================
     @filter.command("关系帮助")
     async def relation_help(self, event: AstrMessageEvent):
+        if not self.session_allowed(event):
+            yield event.plain_result(SESSION_DENIED_TEXT)
+            return
         yield event.plain_result(
             "【关系识别】指令一览\n"
             "设置关系 恋人 —— 设定与 AI 的关系（支持任意自定义名）\n"
+            "设置关系 @某人 恋人 —— 管理员帮别人设置\n"
             "我的关系 —— 查看当前生效的关系\n"
-            "清除关系 —— 取消设定，恢复默认说话方式\n"
+            "清除关系 —— 取消设定（管理员可 @某人 清除）\n"
             "关系列表 —— 看分类总览；关系列表 恋爱 —— 看某一类；关系列表 魅 —— 搜关键词\n"
             "关系详情 魅魔 —— 看完整说明和实际注入内容\n"
-            "查看所有关系 / 关系统计 —— 管理员"
+            "查看所有关系 / 关系统计 —— 管理员\n"
+            "未设置关系时聊满一定轮数，AI 会根据聊天内容自动认定一段关系（可在配置中关闭）"
         )
 
     # ==============================
@@ -648,12 +891,15 @@ class UserTagPlugin(Star):
         """
         if event.is_at_or_wake_command:
             return
+        if not self.session_allowed(event):
+            return
         parsed = parse_command(event.get_message_str())
         if not parsed:
             return
         action, arg = parsed
         if action == "set":
-            async for result in self.save_relation(event, arg):
+            target = self.at_target(event)
+            async for result in self.save_relation(event, arg, target):
                 yield result
         elif action == "clear":
             async for result in self.clear_relation(event):
@@ -681,6 +927,9 @@ class UserTagPlugin(Star):
     # ==============================
     @filter.command("查看所有关系")
     async def all_relation(self, event: AstrMessageEvent):
+        if not self.session_allowed(event):
+            yield event.plain_result(SESSION_DENIED_TEXT)
+            return
         if not self.is_admin(event):
             yield event.plain_result("权限不足")
             return
@@ -704,6 +953,9 @@ class UserTagPlugin(Star):
     # ==============================
     @filter.command("关系统计")
     async def relation_stat(self, event: AstrMessageEvent):
+        if not self.session_allowed(event):
+            yield event.plain_result(SESSION_DENIED_TEXT)
+            return
         if not self.is_admin(event):
             yield event.plain_result("权限不足")
             return
@@ -729,31 +981,107 @@ class UserTagPlugin(Star):
     @filter.on_llm_request()
     async def inject_relation(self, event: AstrMessageEvent, req: ProviderRequest):
         try:
+            if not self.session_allowed(event):
+                return
             uid = str(event.get_sender_id())
             relation = self.relation_for(event)
-            want = f"{HINT_VERSION}|{relation}"
-            seen = last_hint_of(req.contexts, uid)
 
-            if seen and f"{seen[0]}|{seen[1]}" == want:
-                # 这段提示已经在本会话的历史里了，模型还看得见，再发一遍纯属浪费
-                logger.debug("[关系插件] 历史已含关系提示，跳过注入 uid:%s", uid)
-                return
-
-            if not relation:
-                if not seen:
-                    return  # 从没设置过关系，一个字都不用注入
-                text = build_cleared_hint(uid)
-            else:
+            if relation:
+                want = f"{HINT_VERSION}|{relation}"
+                seen = last_hint_of(req.contexts, uid)
+                if seen and f"{seen[0]}|{seen[1]}" == want:
+                    # 这段提示已经在本会话的历史里了，模型还看得见，再发一遍纯属浪费
+                    logger.debug("[关系插件] 历史已含关系提示，跳过注入 uid:%s", uid)
+                    return
                 text = build_hint(relation, uid)
+            else:
+                # 没设置过关系：先把「已解除」提示补发完，再考虑自动认定
+                seen = last_hint_of(req.contexts, uid)
+                if seen:
+                    text = build_cleared_hint(uid)
+                    req.extra_user_content_parts.append(TextPart(text=text))
+                    return
+                if not self.auto_relation_enabled():
+                    return
+                bot_id = self.get_bot_id(event)
+                meta = self.auto_meta(bot_id, uid)
+                meta["msgs"] = int(meta.get("msgs", 0)) + 1
+                if meta["msgs"] < self.auto_after_messages():
+                    return
+                if int(meta.get("rounds", 0)) >= self.auto_max_attempts():
+                    return
+                round_no = int(meta.get("rounds", 0)) + 1
+                seen_round = last_auto_round_of(req.contexts, uid)
+                if seen_round is not None and seen_round >= round_no:
+                    return
+                text = build_auto_prompt(uid, round_no)
+                meta["msgs"] = 0
+                meta["rounds"] = round_no
+                await self.save_data()
+                logger.info(
+                    "[关系插件] 注入自动认定提示 机器人:%s uid:%s 第 %d 轮",
+                    bot_id,
+                    uid,
+                    round_no,
+                )
 
             req.extra_user_content_parts.append(TextPart(text=text))
             logger.debug(
                 "[关系插件] 注入关系提示 机器人:%s uid:%s 关系:%s（%d 字）",
                 self.get_bot_id(event),
                 uid,
-                relation or "已解除",
+                relation or "自动认定",
                 len(text),
             )
         except Exception:
             logger.error("[关系插件] LLM注入异常")
+            logger.error(traceback.format_exc())
+
+    # ==============================
+    # AI 自动认定：剥掉回复里的 <auto_relation> 标记并落库
+    # ==============================
+    @filter.on_decorating_result()
+    async def consume_auto_relation(self, event: AstrMessageEvent):
+        try:
+            if Plain is None:
+                return
+            result = event.get_result()
+            if result is None or not getattr(result, "chain", None):
+                return
+            text = result.get_plain_text()
+            if "<auto_relation>" not in text:
+                return
+
+            match = _AUTO_MARKER_RE.search(text)
+            cleaned = _AUTO_MARKER_RE.sub("", text).strip()
+            relation = clean_relation_name(match.group(1)) if match else ""
+            bot_id = self.get_bot_id(event)
+            uid = str(event.get_sender_id())
+
+            if relation and relation in RELATIONS:
+                self.data.setdefault(bot_id, {})[uid] = relation
+                self.set_source(bot_id, uid, "auto")
+                meta = self.auto_meta(bot_id, uid)
+                meta["msgs"] = 0
+                meta["rounds"] = self.auto_max_attempts()  # 认定完成，之后不再自动认定
+                await self.save_data()
+                logger.info(
+                    "[关系插件] AI 自动认定关系 机器人:%s uid:%s -> %s",
+                    bot_id,
+                    uid,
+                    relation,
+                )
+                if self.auto_notify_enabled():
+                    cleaned += (
+                        f"\n（我把你们的关系认定为：{self.format_relation(relation)}；"
+                        "想换发「设置关系 名字」，不想要发「清除关系」）"
+                    )
+            elif relation:
+                logger.warning(
+                    "[关系插件] 自动认定返回了非预设关系：%r，已忽略", relation
+                )
+
+            result.chain = [Plain(cleaned)] if cleaned else []
+        except Exception:
+            logger.error("[关系插件] 处理自动认定标记异常")
             logger.error(traceback.format_exc())
