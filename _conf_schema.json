@@ -1,0 +1,66 @@
+{
+  "admin_qq": {
+    "description": "管理员QQ列表",
+    "type": "list",
+    "hint": "这里填写的 QQ 号可以使用「查看所有关系」「关系统计」，以及「设置关系 @某人」「清除关系 @某人」代管。AstrBot 全局配置里的管理员（admins_id）无需填写也自动拥有权限。",
+    "default": []
+  },
+
+  "default_relation": {
+    "description": "默认关系名称",
+    "hint": "用户没有自己设置关系时按这一条对待。可填预设名（如 朋友、恋人、魅魔），也可填任意自定义关系，最长 24 字。注意：启用了默认关系后，所有用户都算「已有关系」，AI 自动认定不会再触发。",
+    "type": "string",
+    "default": "朋友"
+  },
+
+  "enable_default_relation": {
+    "description": "是否启用默认关系",
+    "hint": "关闭时，没设置过关系的用户不会被注入任何内容（一个字都不占）；开启后所有用户都会先按默认关系相处。",
+    "type": "bool",
+    "default": false
+  },
+
+  "session_filter_mode": {
+    "description": "会话黑白名单模式",
+    "hint": "off=所有会话都启用；whitelist=只有名单内的会话启用；blacklist=名单内的会话禁用。会话标识：群聊填群号，私聊填对方 QQ 号。",
+    "type": "string",
+    "options": ["off", "whitelist", "blacklist"],
+    "labels": ["关闭（全部启用）", "白名单（仅名单内启用）", "黑名单（名单内禁用）"],
+    "default": "off"
+  },
+
+  "session_list": {
+    "description": "会话名单",
+    "hint": "配合上面的模式使用：一项一个群号或私聊 QQ 号。",
+    "type": "list",
+    "default": []
+  },
+
+  "auto_relation_enabled": {
+    "description": "AI 自动认定关系",
+    "hint": "用户没有设置关系时，聊满一定轮数后 AI 会根据聊天内容从预设关系（非演绎向）里自动认定一段关系，并在回复末尾告知。想完全手动就关掉。",
+    "type": "bool",
+    "default": true
+  },
+
+  "auto_relation_after_messages": {
+    "description": "自动认定的最少聊天轮数",
+    "hint": "用户未设置关系时，累计聊满这么多轮才让 AI 尝试认定一次。默认 12。",
+    "type": "int",
+    "default": 12
+  },
+
+  "auto_relation_max_attempts": {
+    "description": "自动认定最多尝试次数",
+    "hint": "每用户最多给 AI 几次认定机会，判断不出来时不会反复打扰。默认 3。认定成功或用户主动清除关系后，不再自动认定。",
+    "type": "int",
+    "default": 3
+  },
+
+  "auto_relation_notify": {
+    "description": "认定成功后在回复末尾提示",
+    "hint": "关闭后 AI 会静默认定关系，用户发「我的关系」也能查到。",
+    "type": "bool",
+    "default": true
+  }
+}
