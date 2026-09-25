@@ -234,11 +234,17 @@ _HINT_ATTR_RE = re.compile(r'<relation v="(\d+)" uid="([^"]*)" name="([^"]*)"')
 
 # AI 自动认定：注入提示的标记（进历史，靠 round 去重）与模型回复里的落库标记
 _AUTO_PROMPT_RE = re.compile(r'<relation_auto v="(\d+)" uid="([^"]*)" round="(\d+)"')
-_AUTO_MARKER_RE = re.compile(r"<auto_relation>\s*(.*?)\s*</auto_relation>", re.S)
+_AUTO_MARKER_RE = re.compile(r"<auto_relation>\s*(.*?)\s*</auto_relation>", re.S | re.I)
 # 兜底：模型只开了标签没闭合（流式截断/写歪），也把它到行尾一并清掉，不能发出去
-_AUTO_MARKER_OPEN_RE = re.compile(r"<auto_relation>\s*([^<\n]*)", re.S)
-_AUTO_MARKER_STRAY_RE = re.compile(r"</?auto_relation>")
+_AUTO_MARKER_OPEN_RE = re.compile(r"<auto_relation>\s*([^<\n]*)", re.S | re.I)
+_AUTO_MARKER_STRAY_RE = re.compile(r"</?auto_relation>", re.I)
 AUTO_PROMPT_VERSION = 1
+
+
+def has_auto_marker(text: Any) -> bool:
+    """这段文本里有没有自动认定标记。几道守卫共用：模型把标签写成 <Auto_Relation>
+    很常见，按大小写敏感去认，标签会被原样发给用户。"""
+    return "auto_relation" in str(text or "").lower()
 
 
 def _scrub_contexts_auto_marker(contexts: Any) -> None:
@@ -253,11 +259,11 @@ def _scrub_contexts_auto_marker(contexts: Any) -> None:
             continue
         content = ctx.get("content")
         if isinstance(content, str):
-            if "auto_relation" in content:
+            if has_auto_marker(content):
                 ctx["content"], _ = strip_auto_marker(content)
         elif isinstance(content, list):
             for block in content:
-                if isinstance(block, dict) and isinstance(block.get("text"), str) and "auto_relation" in block["text"]:
+                if isinstance(block, dict) and isinstance(block.get("text"), str) and has_auto_marker(block["text"]):
                     block["text"], _ = strip_auto_marker(block["text"])
 
 
@@ -458,11 +464,28 @@ class UserTagPlugin(Star):
         )
         self.load_data()
 
+        total_rel = sum(len(users) for users in self.data.values())
+        total_auto = sum(len(users) for users in self.auto.values())
         logger.info(
             "[关系插件] 初始化完成，预设关系 %d 种，已有数据 %d 个机器人",
             len(RELATIONS),
             len(self.data),
         )
+        if self.data_file.exists():
+            logger.info(
+                "[关系插件] 实例:%s 数据文件:%s（关系 %d 条 / 自动状态 %d 条）",
+                self.name,
+                self.data_file,
+                total_rel,
+                total_auto,
+            )
+        else:
+            logger.warning(
+                "[关系插件] 实例:%s 数据文件 %s 不存在——首次启动、或数据目录被清空/换过路径；"
+                "此前保存的关系与自动认定状态将全部丢失（自动认定可能重新触发）",
+                self.name,
+                self.data_file,
+            )
 
     # ==============================
     # 读取数据（v2 格式 relations/src/auto；自动迁移旧格式）
@@ -494,11 +517,28 @@ class UserTagPlugin(Star):
                     return
 
                 # 旧格式：{"机器人": {"QQ": "关系"}} 或更早的 {"QQ": "关系"}
-                if raw and all(isinstance(v, str) for v in raw.values()):
+                if not raw:
+                    self.data = {}
+                    self.src = {}
+                    self.auto = {}
+                    return
+                if all(isinstance(v, str) for v in raw.values()):
                     logger.warning("[关系插件] 检测到旧格式数据，迁移至 'default' 机器人下。")
                     migrated = {"default": raw}
+                elif all(isinstance(v, dict) for v in raw.values()):
+                    migrated = raw
                 else:
-                    migrated = raw or {}
+                    # 认不出的形状：不能拿它去「迁移」后写回——那等于把人家文件里的
+                    # 东西抹了还不留底。跟坏 JSON 一个处理：备份、从空启动。
+                    backup = self.data_file.with_suffix(".unknown.json")
+                    self.data_file.replace(backup)
+                    logger.error(
+                        "[关系插件] 数据文件是不认识的形状，已备份到 %s 并从空数据启动。", backup
+                    )
+                    self.data = {}
+                    self.src = {}
+                    self.auto = {}
+                    return
                 self.data = {
                     str(bot): {str(uid): str(rel) for uid, rel in users.items()}
                     for bot, users in migrated.items()
@@ -601,13 +641,27 @@ class UserTagPlugin(Star):
 
         标签的剥离与落库分开：on_llm_response 与 on_decorating_result 两条路都会调这里，
         谁先到谁落，后到的看到已是同一关系就不重复写盘。
+
+        两条硬限制：
+        - 只认非演绎向的预设（与递给模型的候选名单同一口径）：名单里没的东西不采纳；
+        - 只填空白，绝不覆盖：用户自己设过的、管理员替他设过的、已认过一次的关系，
+          后续模型再吐标签也不改口（只把标签剥掉），不然「以用户设定为准」就是空话。
         """
         if not relation or relation not in RELATIONS:
             if relation:
                 logger.warning("[关系插件] 自动认定返回了非预设关系：%r，已忽略", relation)
             return False
-        if self.data.get(bot_id, {}).get(uid) == relation and self.source_of(bot_id, uid) == "auto":
-            return True  # 已经落过同一关系，不重复写盘
+        if is_roleplay(relation):
+            logger.warning(
+                "[关系插件] 自动认定返回了演绎向关系：%r（候选名单只给非演绎向），已忽略", relation
+            )
+            return False
+        if uid in self.data.get(bot_id, {}):
+            logger.info(
+                "[关系插件] %s 已有关系 %r（来源 %s），自动认定不覆盖", uid,
+                self.data[bot_id][uid], self.source_of(bot_id, uid),
+            )
+            return False
         self.data.setdefault(bot_id, {})[uid] = relation
         self.set_source(bot_id, uid, "auto")
         meta = self.auto_meta(bot_id, uid)
@@ -682,6 +736,13 @@ class UserTagPlugin(Star):
         except Exception:
             return False
 
+    def auto_notice_text(self, relation: str) -> str:
+        """认定成功后附在回复末尾那一句（两条剖离路径共用）。"""
+        return (
+            f"\n（我把你们的关系认定为：{self.format_relation(relation)}；"
+            "想换就发「设置关系 朋友」这样的名字，不想要发「清除关系」）"
+        )
+
     def format_relation(self, relation: str) -> str:
         if relation in RELATIONS:
             tag = "演绎向" if is_roleplay(relation) else "预设"
@@ -728,6 +789,9 @@ class UserTagPlugin(Star):
 
         self.data[bot_id][qq] = relation
         self.set_source(bot_id, qq, "user" if qq == sender else "admin")
+        # 手动/管理员显式设置 = 该用户关系已定，封住自动认定（与「清除关系」对称），
+        # 之后即使关系被数据丢失等非清除路径弄丢，也不会再被自动认定
+        self.auto_meta(bot_id, qq)["rounds"] = self.auto_max_attempts()
         await self.save_data()
 
         logger.info(
@@ -779,17 +843,27 @@ class UserTagPlugin(Star):
         # 主动清除（含本来就没设置的）= 明确拒绝，不再自动认定
         self.auto_meta(bot_id, qq)["rounds"] = self.auto_max_attempts()
 
-        if bot_id in self.data and qq in self.data[bot_id]:
+        had = bot_id in self.data and qq in self.data[bot_id]
+        if had:
             del self.data[bot_id][qq]
             self.set_source(bot_id, qq, "user")
-            await self.save_data()
             logger.info("[关系插件] 机器人 %s 用户 %s 清除关系", bot_id, qq)
+        # 上面那道「不再自动认定」也得跟着落盘。只在真删掉了东西时才写盘的话，
+        # 本来就没设置过的人发一句清除，重启后他又会被自动认定一遍。
+        await self.save_data()
+
+        if had:
+            back = (
+                f"接下来按配置里的默认关系（{self.default_relation()}）对待。"
+                if self.config.get("enable_default_relation", False)
+                else "下一条消息起恢复默认的说话方式。"
+            )
             if target:
-                yield event.plain_result(f"已清除用户 {qq} 的关系，下一条消息起恢复默认说话方式。")
+                yield event.plain_result(f"已清除用户 {qq} 的关系，{back}")
             else:
-                yield event.plain_result("关系已清除，下一条消息起恢复默认说话方式。")
+                yield event.plain_result(f"关系已清除，{back}")
         else:
-            yield event.plain_result("没有关系记录")
+            yield event.plain_result("还没给你设置过关系。可选：关系列表")
 
     # ==============================
     # 查看我的关系（隔离）
@@ -846,12 +920,15 @@ class UserTagPlugin(Star):
             lines += self.lines_of(hits[:20])
             if len(hits) > 20:
                 lines.append(f"…还有 {len(hits) - 20} 条，换个关键词或发：关系列表")
-            lines.append("看完整说明：关系详情 名字")
+            lines.append(f"看完整说明：关系详情 {hits[0]}")
             return "\n".join(lines)
 
+        # 一个都没匹上时把分类名一并报出来：输「奇」的人想找的是「奇幻」那一类，
+        # 只回一句「没找到」他不知道还能怎么找。
         return (
             f"没找到与「{arg}」相关的预设关系。\n"
-            f"发「关系列表」看全部分类，也可以直接自定义：设置关系 {arg}"
+            "分类可以直接发：关系列表 " + " ｜ 关系列表 ".join(c for c, _ in CATEGORY_BLURBS) + "\n"
+            f"也可以直接自定义：设置关系 {arg}"
         )
 
     def overview_text(self) -> str:
@@ -883,7 +960,10 @@ class UserTagPlugin(Star):
         lines = [f"◇ {category}（{len(names)} 条）", f"　{blurb}"]
         lines += self.lines_of(names)
         lines.append("")
-        lines.append("设置：设置关系 名字（例：设置关系 魅魔）")
+        # 给一个本分类里的真名字当例子：写「设置关系 名字」会被用户原样发出来，
+        # 于是真多出一个名叫「名字」的关系。
+        example = names[0] if names else "朋友"
+        lines.append(f"设一个：设置关系 {example}（也可以写你自己想要的任何名字）")
         return "\n".join(lines)
 
     def lines_of(self, names: List[str]) -> List[str]:
@@ -1062,9 +1142,11 @@ class UserTagPlugin(Star):
                     return
                 text = build_hint(relation, uid)
             else:
-                # 没设置过关系：先把「已解除」提示补发完，再考虑自动认定
+                # 没设置过关系：先把「已解除」提示补发一次，再考虑自动认定。
+                # 历史里最后一条提示已经是「已解除」（name 为空）就跳过，
+                # 否则每条消息都会再注一遍解除提示，历史越堆越长。
                 seen = last_hint_of(req.contexts, uid)
-                if seen:
+                if seen and seen[1]:
                     text = build_cleared_hint(uid)
                     req.extra_user_content_parts.append(TextPart(text=text))
                     return
@@ -1085,11 +1167,13 @@ class UserTagPlugin(Star):
                 meta["msgs"] = 0
                 meta["rounds"] = round_no
                 await self.save_data()
-                logger.info(
-                    "[关系插件] 注入自动认定提示 机器人:%s uid:%s 第 %d 轮",
+                logger.warning(
+                    "[关系插件] 自动认定触发 机器人:%s uid:%s 第 %d/%d 轮；若设置过关系仍反复出现，"
+                    "请检查是否安装了多个本插件实例（各实例数据文件不同，设置只写进其中一个）",
                     bot_id,
                     uid,
                     round_no,
+                    self.auto_max_attempts(),
                 )
 
             req.extra_user_content_parts.append(TextPart(text=text))
@@ -1119,17 +1203,14 @@ class UserTagPlugin(Star):
             if response is None:
                 return
             text = getattr(response, "completion_text", "") or ""
-            if "auto_relation" not in text:
+            if not has_auto_marker(text):
                 return
             cleaned, relation = strip_auto_marker(text)
             bot_id = self.get_bot_id(event)
             uid = str(event.get_sender_id())
             landed = await self.land_auto_relation(bot_id, uid, relation)
             if landed and self.auto_notify_enabled():
-                cleaned = (cleaned + (
-                    f"\n（我把你们的关系认定为：{self.format_relation(relation)}；"
-                    "想换发「设置关系 名字」，不想要发「清除关系」）"
-                )).strip()
+                cleaned = (cleaned + self.auto_notice_text(relation)).strip()
             # 改回 completion_text：设置器会同步到 result_chain 的 Plain 组件（见 LLMResponse.setter）
             try:
                 response.completion_text = cleaned
@@ -1146,7 +1227,7 @@ class UserTagPlugin(Star):
             if result is None or not getattr(result, "chain", None):
                 return
             text = result.get_plain_text() or ""
-            if "auto_relation" not in text:
+            if not has_auto_marker(text):
                 return
 
             cleaned, relation = strip_auto_marker(text)
@@ -1154,10 +1235,7 @@ class UserTagPlugin(Star):
             uid = str(event.get_sender_id())
             landed = await self.land_auto_relation(bot_id, uid, relation)
             if landed and self.auto_notify_enabled():
-                cleaned = (cleaned + (
-                    f"\n（我把你们的关系认定为：{self.format_relation(relation)}；"
-                    "想换发「设置关系 名字」，不想要发「清除关系」）"
-                )).strip()
+                cleaned = (cleaned + self.auto_notice_text(relation)).strip()
 
             # 只改文字，保留图片/At 等非 Plain 组件（旧写法把 chain 整个换成一个 Plain，会抹掉它们）
             self._rewrite_chain_text(result, cleaned)
