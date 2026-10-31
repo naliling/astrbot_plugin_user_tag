@@ -2,6 +2,7 @@ import json
 import os
 import re
 import asyncio
+import functools
 import time
 import traceback
 from collections import Counter
@@ -13,6 +14,20 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Star, Context
 
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+
+from . import texts
+from .relcore import RelCore, category_range, phase_of
+from .relexport import CoreStateExporter
+
+# 面板依赖 quart（AstrBot 4.x 自带）。拿不到就整个不装：指令与注入不该
+# 因为一个可选面板而起不来。
+try:
+    from .panel_api import PanelApi
+except Exception as _panel_error:  # pragma: no cover - 老版本框架
+    PanelApi = None
+    _PANEL_IMPORT_ERROR = str(_panel_error)
+else:
+    _PANEL_IMPORT_ERROR = ""
 
 try:
     from astrbot.core.provider.entities import ProviderRequest
@@ -57,7 +72,7 @@ else:
 
 logger.info("[关系插件] main.py 已加载")
 
-DATA_VERSION = 3
+DATA_VERSION = 4
 MAX_RELATION_LEN = 24
 MAX_NOTE_LEN = 60
 # 上一次硬把上限从 40 提到 48，是为了能写具体动作。但提上去以后
@@ -311,8 +326,8 @@ DEPRECATED: Dict[str, bool] = {
 
 CATEGORY_BLURBS: List[Tuple[str, str]] = [
     ("日常", "普通社交关系：该聊聊、该散散，不暧昧、不越界"),
-    ("亲友", "血缘、姻亲、养��继亲：关心落在吃饭睡觉钱够不够上"),
-    ("恋爱", "确立了的、从热恋到散的全部状态：正在告白、正在分手、刚复合都在里��"),
+    ("亲友", "血缘、姻亲、养／继亲：关心落在吃饭睡觉钱够不够上"),
+    ("恋爱", "确立了的、从热恋到散的全部状态：正在告白、正在分手、刚复合都在里面"),
     ("心动", "说不出口的那一侧：暗恋、错过、白月光、意难平"),
     ("恋爱设定", "高浓度恋爱模板：病娇、傲娇、共犯，味道拉满"),
     ("身份", "师生、职场、师门、军队：先把位置摆正，再谈感情"),
@@ -412,24 +427,7 @@ DENIED_TOOL = (
     "请直接照常和用户聊天，不要提关系设定的事，也不要重试这个工具。"
 )
 
-HELP_TEXT = (
-    "【关系识别】指令一览\n"
-    "设置关系 恋人 —— 设定与 AI 的关系（支持任意自定义名）\n"
-    "临时关系 恋人 —— 只在当前这个对话里有效，不写进存档\n"
-    "关系备注 灰凝 —— 告诉他该怎么称呼你（最常用）；也能写别的关系细节（清空：关系备注 清空）\n"
-    "撤销关系 —— 改错了回退上一步（十分钟内）\n"
-    "我的关系 —— 查看当前生效的关系\n"
-    "设置关系 @某人 恋人 —— 管理员帮别人设置\n"
-    "清除关系 —— 取消设定（管理员可 @某人 清除）\n"
-    "关系列表 —— 先看常用的一批；关系列表 恋爱 —— 看某一类；关系列表 病 —— 搜关键词\n"
-    "关系详情 恋人 —— 看完整说明和模型实际收到的内容\n"
-    "关系管理 —— 管理员，分页总览；关系管理 10001 —— 只看某人；关系管理 10001 2 —— 第 2 页\n"
-    "查看所有关系 —— 管理员，全部关系\n"
-    "关系统计 —— 管理员，按机器人/分类/来源统计\n"
-    "以上指令带不带唤醒前缀都行（群里直接发「设置关系 恋人」也认）。\n"
-    "打不全也能认：「设置关系 女朋友」「设置关系 病」都行。\n"
-    "关系也可以直接用嘴说：让 AI 记住你们是什么关系，它会先问你确不确定。"
-)
+HELP_TEXT = texts.HELP
 
 
 def parse_command(text: str) -> Optional[Tuple[str, str]]:
@@ -704,6 +702,35 @@ else:  # pragma: no cover - 只在缺少 CustomFilter 的老版本上走
             return not event.is_at_or_wake_command
 
 
+def _once_per_message(func):
+    """同一条消息只让一个入口说话。
+
+    AstrBot 会把所有 filter 命中的 handler 依次跑一遍。群里 @机器人 发
+    「设置关系 恋人」时，CommandFilter 和裸指令入口会同时命中：回两遍，
+    而且两次都会记一次限流——第二次就被判成「改得太快了」。
+    用 event.set_extra 打标记，第二个入口看到标记就收手。
+    """
+
+    @functools.wraps(func)
+    async def wrapper(self, event, *args, **kwargs):
+        try:
+            if event.get_extra("user_tag_handled"):
+                return
+        except Exception:
+            # 拿不到 extra 的老事件对象就别拦，宁可多回一条也不能一条都不回
+            pass
+        # 标记在**真正要说话的那一刻**才打：万一先进来的入口自己判断
+        # 「这条不归我管」然后静默返回，标记不能提前占掉，否则谁都不回。
+        async for item in func(self, event, *args, **kwargs):
+            try:
+                event.set_extra("user_tag_handled", True)
+            except Exception:
+                pass
+            yield item
+
+    return wrapper
+
+
 class UserTagPlugin(Star):
 
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -730,6 +757,12 @@ class UserTagPlugin(Star):
             / self.name
             / "user_tag.json"
         )
+        # v4 的运行时状态：互动统计、变更历史、群内覆盖、限流。
+        # 必须在 load_data() 之前建好——_adopt 里要把这些从存档里捞出来。
+        self.core = RelCore(self)
+        self.exporter = CoreStateExporter(self)
+        self.panel: Any = None
+        self._heartbeat_task: Any = None
         self.load_data()
 
         total_rel = sum(len(users) for users in self.data.values())
@@ -742,6 +775,22 @@ class UserTagPlugin(Star):
             # 而第一次安装本来就没有任何关系可丢，新用户一开就被吓一跳。
             # 分不清新装还是被清过，就别替后者说话。
             logger.info("[关系插件] 初次运行，关系数据将新建于 %s", self.data_file)
+
+        # 面板：注册不上只警告，不影响插件本体。
+        self.install_panel()
+        # 对外导出：开机先写一次，免得 AS 那边要等第一个心跳。
+        if bool(self.config.get("export_to_social", False)):
+            try:
+                self.exporter.write()
+            except Exception:
+                logger.error("[关系插件] 启动导出失败：%s", traceback.format_exc())
+        try:
+            self._heartbeat_task = asyncio.get_running_loop().create_task(
+                self.heartbeat_loop()
+            )
+        except RuntimeError:
+            # 没有运行中的事件循环（某些测试/同步初始化路径），心跳不装。
+            self._heartbeat_task = None
 
     # ==============================
     # 读取数据
@@ -775,6 +824,9 @@ class UserTagPlugin(Star):
         self.data = {}
         self.meta = {}
         self.pending = {}
+        core = getattr(self, "core", None)
+        if core is not None:
+            core.reset()
 
     def _backup_and_reset(self, suffix: str, why: str):
         backup = self.data_file.with_suffix(suffix)
@@ -855,6 +907,9 @@ class UserTagPlugin(Star):
         self.data = data
         self.meta = meta
         self.pending = pending
+        core = getattr(self, "core", None)
+        if core is not None:
+            core.adopt(raw)
         if raw.get("v") != DATA_VERSION:
             logger.info("[关系插件] 数据已升级到 v%d 格式。", DATA_VERSION)
 
@@ -873,6 +928,9 @@ class UserTagPlugin(Star):
             "meta": self.meta,
             "pending": self.pending,
         }
+        core = getattr(self, "core", None)
+        if core is not None:
+            payload.update(core.payload())
         async with self.lock:
             tmp = self.data_file.with_name(self.data_file.name + ".tmp")
             try:
@@ -951,8 +1009,17 @@ class UserTagPlugin(Star):
         temp = self.temp_of(event, uid)
         if temp:
             return temp[0], temp[1], "临时"
+        # 群内独立关系优先于全局。默认关：「群里是同事、私聊是恋人」这种
+        # 设定对多数人是意外而不是惊喜，得管理员显式打开。
+        if self.separate_group_relation():
+            scoped = self.core.group_get(bot_id, self.umo_of(event), uid)
+            if scoped:
+                return scoped, self.note_of(bot_id, uid), "本群设定"
         name = self.data.get(bot_id, {}).get(uid, "")
         if name:
+            # 过期不是删除：数据还在，只是不再注入。面板上标红，等人回来再算。
+            if self.core.expired(bot_id, uid, self.relation_ttl_days()):
+                return "", "", ""
             label = self.SOURCE_LABELS.get(self.source_of(bot_id, uid), "自己设置")
             return name, self.note_of(bot_id, uid), label
         if self.config.get("enable_default_relation", False):
@@ -1056,6 +1123,7 @@ class UserTagPlugin(Star):
         self, bot_id: str, uid: str, relation: str, src: str,
         note: Optional[str] = None,
     ) -> bool:
+        before = str(self.data.get(bot_id, {}).get(uid, "") or "")
         self.data.setdefault(bot_id, {})[uid] = relation
         entry = self.meta_of(bot_id, uid, create=True)
         if src == "user":
@@ -1070,19 +1138,41 @@ class UserTagPlugin(Star):
                 entry.pop("note", None)
         entry["at"] = int(time.time())
         self.pending.get(bot_id, {}).pop(uid, None)
+        changed = before != relation
+        if changed:
+            self.core.push_hist(bot_id, uid, before, relation, src, note or "")
+            self.core.push_event(
+                "change", bot_id, uid,
+                "%s → %s（%s）" % (
+                    before or "（无）", relation,
+                    self.SOURCE_LABELS.get(src, src),
+                ),
+            )
         ok = await self.save_data()
         logger.info("[关系插件] 机器人 %s 用户 %s 关系=%s（来源：%s，落盘=%s）",
                     bot_id, uid, relation, src, ok)
+        if changed:
+            await self.notify_admin_change(bot_id, uid, before, relation, src)
+            self.schedule_export()
         return ok
 
     async def erase_relation(self, bot_id: str, uid: str) -> bool:
+        before = str(self.data.get(bot_id, {}).get(uid, "") or "")
         had = uid in self.data.get(bot_id, {})
         self.data.get(bot_id, {}).pop(uid, None)
         self.meta.get(bot_id, {}).pop(uid, None)
         self.pending.get(bot_id, {}).pop(uid, None)
         if had:
+            self.core.push_hist(bot_id, uid, before, "", "system", "清除关系")
+            self.core.push_event(
+                "change", bot_id, uid, "%s → （已清除）" % (before or "（无）")
+            )
             logger.info("[关系插件] 机器人 %s 用户 %s 清除关系", bot_id, uid)
-        return await self.save_data()
+        ok = await self.save_data()
+        if had:
+            await self.notify_admin_change(bot_id, uid, before, "（已清除）", "system")
+            self.schedule_export()
+        return ok
 
     def _clean_note(self, raw: str) -> str:
         return clean_relation_name(raw)[: self.max_note_len()]
@@ -1155,16 +1245,7 @@ class UserTagPlugin(Star):
             return SESSION_DENIED_TEXT
 
         if not relation:
-            if multi:
-                return ("用法：设置关系 @某人 关系名\n"
-                        "例：设置关系 @张三 恋人 ｜ 设置关系 @张三 @李四 恋人")
-            return (
-                "用法：设置关系 关系名\n"
-                "例：设置关系 恋人 ／ 设置关系 魅魔\n"
-                "想一次说完也行：设置关系 恋人 灰凝\n"
-                "（后半句是他该怎么称呼你）\n"
-                "不知道有什么可选？发：关系列表"
-            )
+            return texts.SET_USAGE_AT if multi else texts.SET_USAGE
 
         # 「设置关系 恋人 灰凝」= 关系 + 备注，一条消息做完。
         # 旧版把后半句静默丢掉，回复还只说「已设置关系为：恋人」——
@@ -1214,8 +1295,19 @@ class UserTagPlugin(Star):
         first_time = not self.data.get(bot_id, {}).get(qq)
         done: List[str] = []
         failed: List[str] = []
+        # 设成跟现在一模一样的东西，什么都不用动，也别扣限流额度。
+        # 人手上会连发两次同一条命令，那时候不该被「慢一点」打断。
+        if not multi and not tail and self.data.get(bot_id, {}).get(sender) == name:
+            return (
+                "本来就是「" + self.format_relation(name) + "」，没动。"
+                + chr(10)
+                + "想换个说法就发：设置关系 别的"
+            )
         # 旧关系 / 有没有临时层，都必须在**写入前**取。写完再取就只剩新值，
         # 「原来是「恋人」，要回去发：撤销关系」这种提示会永远发不出来。
+        blocked = self.rate_take(event)
+        if blocked:
+            return blocked
         prev = {u: self.data.get(bot_id, {}).get(u, "") for u in (multi or [sender])}
         temp_gone = [u for u in prev
                      if self.temp.get(self.umo_of(event), {}).pop(u, None) is not None]
@@ -1282,6 +1374,9 @@ class UserTagPlugin(Star):
         umo = self.umo_of(event)
         uid = str(event.get_sender_id())
         arg = clean_relation_name(relation)
+        blocked = self.rate_take(event)
+        if blocked:
+            return blocked
         if arg in ("清除", "关", "取消", "结束", "清空", "off"):
             had = self.temp.get(umo, {}).pop(uid, None)
             if not had:
@@ -1293,12 +1388,7 @@ class UserTagPlugin(Star):
 
         if not arg:
             saved = self.data.get(self.get_bot_id(event), {}).get(uid, "")
-            if saved:
-                return (
-                    f"用法：临时关系 关系名\n"
-                    f"例：临时关系 恋人（只在这个对话里有效，不影响你保存的「{saved}」）"
-                )
-            return "用法：临时关系 关系名\n例：临时关系 恋人（只在这个对话里有效）"
+            return texts.temp_usage(saved)
 
         name, alias, candidates = resolve_relation_input(arg, self.fuzzy_enabled())
         if not name and candidates:
@@ -1350,7 +1440,7 @@ class UserTagPlugin(Star):
         key = f"{bot_id}|{uid}"
         prev = self.undo.get(key)
         if not prev:
-            return "没有可撤销的改动。"
+            return texts.UNDO_NONE
         if time.time() - int(prev[2]) > UNDO_TTL:
             self.undo.pop(key, None)
             return (f"那次改动已经超过 {UNDO_TTL // 60} 分钟了，想不起来撤的是什么。\n"
@@ -1402,6 +1492,9 @@ class UserTagPlugin(Star):
             return "还没给你设置过关系（撤销快照没动）。\n可选：关系列表"
         if not target_uid:
             self.remember(event, bot_id, qq)
+        blocked = self.rate_take(event)
+        if blocked:
+            return blocked
         self.temp.get(self.umo_of(event), {}).pop(qq, None)
         ok = await self.erase_relation(bot_id, qq)
         back = (
@@ -1427,12 +1520,10 @@ class UserTagPlugin(Star):
         raw = re.sub(r"^@\S+\s*", "", clean_relation_name(text))
         clearing = raw in ("清空", "清除", "删掉", "去掉", "不要了")
         if not raw:
-            return (
-                "用法：关系备注 <一句话>\n"
-                "最常用的是告诉他该怎么称呼你：关系备注 灰凝\n"
-                "也能写别的：关系备注 她讨厌被叫全名\n"
-                f"清掉备注：关系备注 清空　（最多 {self.max_note_len()} 字）"
-            )
+            return texts.note_usage(self.max_note_len())
+        blocked = self.rate_take(event)
+        if blocked:
+            return blocked
         umo = self.umo_of(event)
         # 临时关系在场时备注跟着临时的那条走，否则会出现「临时关系是恋人」配
         # 一条属于别的关系的备注。
@@ -1481,6 +1572,7 @@ class UserTagPlugin(Star):
     # 指令
     # ==============================
     @filter.command("设置关系", alias={"关系设定"})
+    @_once_per_message
     async def set_relation(self, event: AstrMessageEvent, relation: GreedyStr = ""):
         if not self.session_allowed(event):
             yield event.plain_result(SESSION_DENIED_TEXT)
@@ -1490,6 +1582,7 @@ class UserTagPlugin(Star):
         )
 
     @filter.command("临时关系")
+    @_once_per_message
     async def temp_relation(self, event: AstrMessageEvent, relation: GreedyStr = ""):
         if not self.session_allowed(event):
             yield event.plain_result(SESSION_DENIED_TEXT)
@@ -1497,6 +1590,7 @@ class UserTagPlugin(Star):
         yield event.plain_result(await self.do_temp(event, str(relation)))
 
     @filter.command("撤销关系")
+    @_once_per_message
     async def undo_relation(self, event: AstrMessageEvent):
         if not self.session_allowed(event):
             yield event.plain_result(SESSION_DENIED_TEXT)
@@ -1504,6 +1598,7 @@ class UserTagPlugin(Star):
         yield event.plain_result(await self.do_undo(event))
 
     @filter.command("清除关系", alias={"删除关系"})
+    @_once_per_message
     async def clear_relation(self, event: AstrMessageEvent):
         if not self.session_allowed(event):
             yield event.plain_result(SESSION_DENIED_TEXT)
@@ -1511,6 +1606,7 @@ class UserTagPlugin(Star):
         yield event.plain_result(await self.do_clear(event, self.at_target(event)))
 
     @filter.command("关系备注")
+    @_once_per_message
     async def relation_note(self, event: AstrMessageEvent, text: GreedyStr = ""):
         if not self.session_allowed(event):
             yield event.plain_result(SESSION_DENIED_TEXT)
@@ -1518,6 +1614,7 @@ class UserTagPlugin(Star):
         yield event.plain_result(await self.do_note(event, str(text), self.at_target(event)))
 
     @filter.command("查看我的关系", alias={"我的关系"})
+    @_once_per_message
     async def my_relation(self, event: AstrMessageEvent):
         if not self.session_allowed(event):
             yield event.plain_result(SESSION_DENIED_TEXT)
@@ -1525,6 +1622,7 @@ class UserTagPlugin(Star):
         yield event.plain_result(await self.do_mine(event))
 
     @filter.command("关系列表", alias={"可用关系"})
+    @_once_per_message
     async def relation_list(self, event: AstrMessageEvent, arg: GreedyStr = ""):
         if not self.session_allowed(event):
             yield event.plain_result(SESSION_DENIED_TEXT)
@@ -1535,21 +1633,21 @@ class UserTagPlugin(Star):
         yield event.plain_result(self.list_text(str(arg), note))
 
     @filter.command("关系详情")
+    @_once_per_message
     async def relation_detail(self, event: AstrMessageEvent, name: GreedyStr = ""):
         if not self.session_allowed(event):
             yield event.plain_result(SESSION_DENIED_TEXT)
             return
         name = clean_relation_name(str(name))
         if not name:
-            yield event.plain_result(
-                "用法：关系详情 恋人\n会显示这条关系的完整说明，"
-                "以及模型实际收到的内容。")
+            yield event.plain_result(texts.DETAIL_USAGE)
             return
         uid = str(event.get_sender_id())
         note = self.effective(event)[1] if self.relation_for(event) == name else ""
         yield event.plain_result(self.detail_text(name, note))
 
     @filter.command("查看所有关系")
+    @_once_per_message
     async def all_relation(self, event: AstrMessageEvent, arg: GreedyStr = ""):
         if not self.session_allowed(event):
             yield event.plain_result(SESSION_DENIED_TEXT)
@@ -1560,6 +1658,7 @@ class UserTagPlugin(Star):
         yield event.plain_result(await self.admin_text(str(arg), mode="all"))
 
     @filter.command("关系统计")
+    @_once_per_message
     async def relation_stat(self, event: AstrMessageEvent):
         if not self.session_allowed(event):
             yield event.plain_result(SESSION_DENIED_TEXT)
@@ -1570,6 +1669,7 @@ class UserTagPlugin(Star):
         yield event.plain_result(await self.admin_text("", mode="stat"))
 
     @filter.command("关系管理")
+    @_once_per_message
     async def relation_admin(self, event: AstrMessageEvent, arg: GreedyStr = ""):
         if not self.session_allowed(event):
             yield event.plain_result(SESSION_DENIED_TEXT)
@@ -1580,6 +1680,7 @@ class UserTagPlugin(Star):
         yield event.plain_result(await self.admin_text(str(arg)))
 
     @filter.command("关系帮助")
+    @_once_per_message
     async def relation_help(self, event: AstrMessageEvent):
         if not self.session_allowed(event):
             yield event.plain_result(SESSION_DENIED_TEXT)
@@ -1590,6 +1691,7 @@ class UserTagPlugin(Star):
     # 裸指令入口
     # ==============================
     @filter.custom_filter(BareCommandFilter)
+    @_once_per_message
     async def bare_command(self, event: AstrMessageEvent):
         """群聊里不带唤醒前缀直接打「设置关系 恋人」也能用。"""
         if not self.session_allowed(event):
@@ -1992,11 +2094,14 @@ class UserTagPlugin(Star):
             bot_id = self.get_bot_id(event)
             uid = str(event.get_sender_id())
             relation, note, _label = self.effective(event)
+            # 统计和关系无关也要记：没设关系的人也得有活跃度，面板才画得出分布。
+            if self.stat_enabled():
+                self.core.bump(bot_id, uid)
             if not relation:
                 return
             # 每条消息都发一次。走 mark_as_temp 时这段不落历史，靠的是「模型这一轮看得到」，
             # 而不是「模型记着上一轮」，所以历史被截断、换会话都不会让关系失效。
-            text = build_hint(relation, note, self.meta_level())
+            text = self.render_hint(relation, note, bot_id, uid)
             req.extra_user_content_parts.append(temp_text_part(text))
             logger.debug(
                 "[关系插件] 注入关系提示 机器人:%s uid:%s 关系:%s（%d 字）",
@@ -2005,3 +2110,220 @@ class UserTagPlugin(Star):
         except Exception:
             logger.error("[关系插件] LLM注入异常")
             logger.error(traceback.format_exc())
+
+    # ==============================
+    # v4：统计 / 历史 / 有效期 / 限流 / 模板 / 导出 / 面板
+    # ==============================
+    version = "2.6.2"
+    DATA_VERSION_LABEL = 4
+
+    def log_warn(self, message: str) -> None:
+        logger.warning("[关系插件] %s", message)
+
+    def log_error(self, message: str) -> None:
+        logger.error("[关系插件] %s", message)
+
+    def stat_enabled(self) -> bool:
+        return bool(self.config.get("stat_enabled", True))
+
+    def separate_group_relation(self) -> bool:
+        return bool(self.config.get("separate_group_relation", False))
+
+    def relation_ttl_days(self) -> int:
+        try:
+            return max(0, int(self.config.get("relation_ttl_days", 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    def rate_limit_per_min(self) -> int:
+        try:
+            return max(0, int(self.config.get("rate_limit_per_min", 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    def rate_blocked(self, event) -> str:
+        """指令限流。返回空串表示放行。管理员不卡——否则调试时会被自己拦住。"""
+        limit = self.rate_limit_per_min()
+        if limit <= 0:
+            return ""
+        try:
+            if self.is_admin(event):
+                return ""
+            uid = str(event.get_sender_id())
+        except Exception:
+            return ""
+        if self.core.rate_peek("cmd:%s" % uid, limit):
+            return ""
+        return texts.RATE.format(limit=limit)
+
+    def rate_take(self, event) -> str:
+        """真正要改东西时才占额度。返回空串表示放行。"""
+        limit = self.rate_limit_per_min()
+        if limit <= 0:
+            return ""
+        try:
+            if self.is_admin(event):
+                return ""
+            uid = str(event.get_sender_id())
+        except Exception:
+            return ""
+        if self.core.rate_take("cmd:%s" % uid, limit):
+            return ""
+        return texts.RATE.format(limit=limit)
+
+    def default_hint_template(self) -> str:
+        return "<relation>{phrase}：{body}。{addon}{meta}</relation>"
+
+    def render_hint(self, relation: str, note: str = "",
+                    bot_id: str = "", uid: str = "",
+                    template: str | None = None) -> str:
+        """生成注入块。没配模板就原样走 build_hint，行为与旧版完全一致。
+
+        template 显式传字符串时用传进来的那一版（面板实时预览用），
+        传 None 才读配置——这样预览不会把没保存的草稿写进配置。
+        """
+        relation = clean_relation_name(relation)
+        if not relation:
+            return ""
+        if template is None:
+            template = str(self.config.get("hint_template", "") or "")
+        template = str(template).strip()
+        if not template:
+            return build_hint(relation, note, self.meta_level())
+
+        entry = RELATIONS.get(relation)
+        if entry:
+            body = entry[2].rstrip("。")
+        else:
+            body = "按这个关系的字面含义相处，称呼语气亲疏都从字面来；你说了算的除外"
+        phrase = role_phrase(relation)
+        addon = ""
+        if note:
+            if looks_like_name(note):
+                phrase = phrase.replace("他", note, 1)
+            else:
+                addon = "他补的一句：%s。" % note
+        meta = ""
+        if self.meta_level() >= 1:
+            meta = "以本条为准。"
+        affection = 0
+        phase = ""
+        try:
+            if bot_id and uid and relation:
+                category = relation_category(relation)
+                affection = self.core.affection(bot_id, uid, relation, category)
+                phase = phase_of(affection)
+        except Exception:
+            affection = 0
+            phase = ""
+        values = {
+            "phrase": phrase,
+            "body": body,
+            "addon": addon,
+            "note": note or "",
+            "meta": meta,
+            "relation": relation,
+            "affection": affection,
+            "phase": phase,
+        }
+        try:
+            return template.format(**values)
+        except (KeyError, IndexError, ValueError):
+            # 模板写坏了就退回默认：一条坏配置不该把整段注入吞掉。
+            logger.warning("[关系插件] 提示词模板有未知变量，已回退默认。")
+            return build_hint(relation, note, self.meta_level())
+
+    async def notify_admin_change(self, bot_id: str, uid: str,
+                                  before: str, after: str, src: str) -> None:
+        """关系变了就告诉管理员。默认关：绝大多数人不想要这条噪音。"""
+        if not bool(self.config.get("notify_admin_on_change", False)):
+            return
+        text = "[关系变更] 机器人 %s · QQ %s：%s → %s（%s）" % (
+            bot_id, uid, before or "（无）", after,
+            self.SOURCE_LABELS.get(src, src),
+        )
+        logger.info("%s", text)
+        umo = str(self.config.get("notify_umo", "") or "").strip()
+        if not umo:
+            return
+        sender = getattr(self.context, "send_message", None)
+        if not callable(sender):
+            return
+        try:
+            from astrbot.api.message_components import Plain
+            await sender(umo, [Plain(text=text)])
+        except Exception:
+            logger.warning("[关系插件] 管理员变更通知发送失败（已记日志）：%s", text)
+
+    def schedule_export(self) -> None:
+        """改完关系顺手推一次 state.json。关掉导出时什么都不做。"""
+        if not bool(self.config.get("export_to_social", False)):
+            return
+        try:
+            asyncio.get_running_loop().create_task(self._export_once())
+        except RuntimeError:
+            try:
+                self.exporter.write()
+            except Exception:
+                logger.error(traceback.format_exc())
+
+    async def _export_once(self) -> None:
+        try:
+            ok = self.exporter.write()
+            if not ok:
+                logger.debug("[关系插件] state.json 未写入：%s",
+                             self.exporter.skipped_reason or self.exporter.last_error)
+        except Exception:
+            logger.error("[关系插件] state.json 导出异常：%s", traceback.format_exc())
+
+    async def heartbeat_loop(self) -> None:
+        """每 20 分钟刷新一次 generated_at。
+
+        不刷的话，autonomous_social 那边 45 分钟就把内容当过期清空，
+        看起来像「接上了又断了」——而这其实只是没人碰文件。
+        """
+        try:
+            interval = max(5, int(self.config.get("export_interval_min", 20) or 20)) * 60
+        except (TypeError, ValueError):
+            interval = 20 * 60
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                if bool(self.config.get("export_to_social", False)):
+                    self.exporter.write()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.error("[关系插件] 心跳异常：%s", traceback.format_exc())
+
+    def install_panel(self) -> None:
+        if PanelApi is None:
+            self.log_warn("面板模块不可用（%s），只提供指令与注入。" % _PANEL_IMPORT_ERROR)
+            return
+        if not bool(self.config.get("panel_enabled", True)):
+            logger.info("[关系插件] 面板已在配置里关闭（panel_enabled）。")
+            return
+        try:
+            self.panel = PanelApi(self)
+            paths = self.panel.register_routes()
+        except Exception:
+            logger.error("[关系插件] 面板注册失败：%s", traceback.format_exc())
+            return
+        if paths:
+            logger.info("[关系插件] 面板已注册 %d 个接口，页面在 views/关系面板/。", len(paths))
+        else:
+            self.log_warn("面板接口一个都没注册上（框架没有 register_web_api）。")
+
+    async def terminate(self) -> None:
+        try:
+            task = getattr(self, "_heartbeat_task", None)
+            if task is not None and not task.done():
+                task.cancel()
+        except Exception:
+            pass
+        panel = getattr(self, "panel", None)
+        if panel is not None:
+            try:
+                panel.unregister_routes()
+            except Exception:
+                pass

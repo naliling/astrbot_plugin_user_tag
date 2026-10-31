@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>关系识别</title>
+<link rel="stylesheet" href="./app.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="nav">
+    <div class="nav-head">
+      <span class="nav-title">关系识别</span>
+      <span class="nav-ver" id="navVer">user_tag</span>
+    </div>
+    <div class="nav-body" id="nav"></div>
+    <div class="nav-foot">
+      <span id="navStatus" class="dot-idle">连接中</span>
+      <button class="btn btn-ghost btn-sm" id="btnReload" title="重新拉取数据">重载</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="bar">
+      <h1 id="viewTitle">用户关系</h1>
+      <div class="bar-side">
+        <span id="viewHint" class="hint"></span>
+      </div>
+    </header>
+    <div class="banner" id="banner" hidden></div>
+    <section class="view" id="view"></section>
+  </main>
+
+</div>
+<script src="./app.js"></script>
+</body>
+</html>

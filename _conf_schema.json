@@ -71,5 +71,96 @@
     "hint": "配合上面的模式使用：一项一个群号或私聊 QQ 号。",
     "type": "list",
     "default": []
+  },
+
+  "panel_enabled": {
+    "description": "启用网页面板",
+    "hint": "在 AstrBot 后台的插件页面里会出现「关系面板」：概览、用户关系、互动统计、变更历史、关系演进、对外对接、提示词模板。关掉后指令一切照常，只是没有网页。",
+    "type": "bool",
+    "default": true
+  },
+
+  "panel_token": {
+    "description": "面板访问令牌（可选）",
+    "hint": "留空表示只依赖 AstrBot 后台自身的登录态。如果面板链接会被别人拿到（比如你把它嵌到了别的页面），填一串随机字符，前端会在请求头里带 X-Rel-Token。",
+    "type": "string",
+    "default": ""
+  },
+
+  "stat_enabled": {
+    "description": "记录互动统计",
+    "hint": "每次对话给当前用户记一笔（句数、首次、最近、每日分布），面板的互动统计和好感度都靠它。关掉后一切照旧，只是面板里那些数字都变 0。",
+    "type": "bool",
+    "default": true
+  },
+
+  "affection_evolve": {
+    "description": "好感度随相处演进",
+    "hint": "开启后，同一个关系会随着「聊了多少句」和「认识了多少天」在类别区间内缓慢往上走（恋人 80→92，同事 35→55），而不是一个固定数字。只影响面板显示与注入里的 {affection}/{phase}，不会自己改关系名。",
+    "type": "bool",
+    "default": true
+  },
+
+  "separate_group_relation": {
+    "description": "群聊与私聊分开算",
+    "hint": "开启后，可以给某个人在某个群里单独设一套关系（面板里设），群里读群内的，私聊读全局的。默认关：「群里是同事、私聊是恋人」对多数人是意外而不是惊喜。",
+    "type": "bool",
+    "default": false
+  },
+
+  "relation_ttl_days": {
+    "description": "关系有效期（天）",
+    "hint": "0 = 永久有效（默认）。填了数字后，超过这么多天没互动的关系就不再注入提示词（数据不删，面板上标红），免得一个半年前聊过一次的人永远按「恋人」对待。",
+    "type": "int",
+    "default": 0
+  },
+
+  "rate_limit_per_min": {
+    "description": "指令限流（次/分钟）",
+    "hint": "0 = 不限（默认）。给普通用户设个上限，防手滑刷屏。管理员不受限——否则你自己调试时会被自己拦住。",
+    "type": "int",
+    "default": 0
+  },
+
+  "hint_template": {
+    "description": "提示词模板（可选）",
+    "hint": "留空则用内置写法（<relation>我在{称呼}面前就是{关系}：…。以本条为准。</relation>）。要自定义就写一整段，可用变量：{phrase} {body} {addon} {note} {meta} {relation} {affection} {phase}。写错变量名会自动退回内置写法，不会把注入吞掉。",
+    "type": "string",
+    "default": ""
+  },
+
+  "notify_admin_on_change": {
+    "description": "关系变更通知管理员",
+    "hint": "开启后每次关系被改（包括 AI 自己改的）都会记一条日志；配合下面的「通知会话」还能主动发一条消息。默认关——绝大多数人不想要这条噪音。",
+    "type": "bool",
+    "default": false
+  },
+
+  "notify_umo": {
+    "description": "变更通知发到哪",
+    "hint": "填一个会话的 unified_msg_origin（比如某个私聊或群的标识），关系变更会发到这里。留空则只记日志。仅在上一项开启时生效。",
+    "type": "string",
+    "default": ""
+  },
+
+  "export_to_social": {
+    "description": "向 autonomous_social 导出关系",
+    "hint": "开启后把关系写成 autonomous_social 能读的 state.json，并每 20 分钟心跳一次。注意：AS 按顺序找 humanoid_core/state.json、astrbot_plugin_humanoid_core/state.json，取第一个存在的；装了 Humanoid Core 本体时它占着前一个，本插件的导出就不会被读到（面板「导出」页会如实标出来）。默认关：抢文件的代价远大于晚一点接上。",
+    "type": "bool",
+    "default": false
+  },
+
+  "export_interval_min": {
+    "description": "导出心跳间隔（分钟）",
+    "hint": "autonomous_social 那边超过 45 分钟没看到新文件就把内容当过期清空，所以要定期刷新。默认 20 分钟，别调到 45 以上。",
+    "type": "int",
+    "default": 20
+  },
+
+  "export_target_path": {
+    "description": "导出目标文件",
+    "hint": "相对 plugin_data/ 的路径，默认 astrbot_plugin_humanoid_core/state.json。humanoid_core/state.json 是 Humanoid Core 本体的全量状态，本插件会拒绝写它（覆盖别人的状态不可接受）。",
+    "type": "string",
+    "default": "astrbot_plugin_humanoid_core/state.json"
   }
 }
